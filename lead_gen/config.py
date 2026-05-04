@@ -9,22 +9,21 @@ SCRAPERAPI_KEY = os.getenv("SCRAPERAPI_KEY", "")
 SEARCH = {
     "query": "plumbers",
     "location": "Fort Lauderdale, FL",
-    "max_per_source": 25,
+    "max_per_source": 40,  # up to 40 leads per source
+    "max_pages": 3,        # how many result pages to scrape per source
 }
 
+# Toggle sources on/off
 SOURCES = {
     "yellow_pages": True,
     "yelp": True,
-    "chamber": True,
-    "bni": True,
+    "chamber": False,
+    "bni": False,
 }
 
 # Add your local Chamber of Commerce member directory URLs here
 CHAMBER_URLS = [
     # "https://members.ftlchamber.com/list",
-    # "https://business.bocaratonchamber.com/list",
-    # "https://www.tamarac.org/298/Chamber-of-Commerce",
-    # "https://www.coralspr ingschamber.com/list/",
 ]
 
 # Add BNI chapter member page URLs here
