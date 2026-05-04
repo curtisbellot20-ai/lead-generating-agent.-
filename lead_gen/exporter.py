@@ -9,6 +9,7 @@ HEADERS = [
     "Business Name",
     "Owner Name",
     "Phone",
+    "Email",
     "Address",
     "Website",
     "Category",
@@ -20,7 +21,7 @@ HEADERS = [
     "Outreach Note",
 ]
 
-COL_WIDTHS = [35, 20, 18, 45, 35, 20, 10, 10, 12, 18, 16, 65]
+COL_WIDTHS = [35, 20, 18, 32, 45, 35, 20, 10, 10, 12, 18, 16, 65]
 
 
 def _border():
@@ -42,9 +43,9 @@ def export_to_excel(leads: list[dict], query: str, location: str) -> str:
     mid_blue  = "1A1A2E"
     alt_gray  = "F8F9FA"
     border    = _border()
+    last_col  = get_column_letter(len(HEADERS))
 
-    # ── Title row ──────────────────────────────────────────────────
-    last_col = get_column_letter(len(HEADERS))
+    # ── Title row
     ws.merge_cells(f"A1:{last_col}1")
     tc = ws["A1"]
     tc.value     = f"Lead Generation Report — {query.title()} in {location}"
@@ -53,23 +54,25 @@ def export_to_excel(leads: list[dict], query: str, location: str) -> str:
     tc.alignment = Alignment(horizontal="center", vertical="center")
     ws.row_dimensions[1].height = 35
 
-    # ── Meta row ───────────────────────────────────────────────────
+    # ── Meta row
+    emails_found = sum(1 for l in leads if l.get("email"))
     ws.merge_cells(f"A2:{last_col}2")
     mc = ws["A2"]
     mc.value = (
         f"Generated: {datetime.now().strftime('%B %d, %Y %I:%M %p')}  "
-        f"|  Total Leads: {len(leads)}"
+        f"|  Total Leads: {len(leads)}  "
+        f"|  Emails Found: {emails_found}"
     )
     mc.font      = Font(italic=True, color="666666", size=10)
     mc.alignment = Alignment(horizontal="center")
     ws.row_dimensions[2].height = 20
 
-    # ── Header row ─────────────────────────────────────────────────
+    # ── Header row
     hdr_fill  = PatternFill(start_color=mid_blue, end_color=mid_blue, fill_type="solid")
     hdr_font  = Font(bold=True, color="FFFFFF", size=11)
     hdr_align = Alignment(horizontal="center", vertical="center", wrap_text=True)
     for col, (hdr, width) in enumerate(zip(HEADERS, COL_WIDTHS), 1):
-        cell = ws.cell(row=3, column=col, value=hdr)
+        cell           = ws.cell(row=3, column=col, value=hdr)
         cell.font      = hdr_font
         cell.fill      = hdr_fill
         cell.alignment = hdr_align
@@ -77,8 +80,9 @@ def export_to_excel(leads: list[dict], query: str, location: str) -> str:
         ws.column_dimensions[get_column_letter(col)].width = width
     ws.row_dimensions[3].height = 30
 
-    # ── Data rows ──────────────────────────────────────────────────
-    data_align = Alignment(vertical="center", wrap_text=True)
+    # ── Data rows
+    data_align  = Alignment(vertical="center", wrap_text=True)
+    email_font  = Font(color="0563C1", underline="single")  # blue for email cells
     for row_idx, lead in enumerate(leads, 4):
         row_fill = (
             PatternFill(start_color=alt_gray, end_color=alt_gray, fill_type="solid")
@@ -88,6 +92,7 @@ def export_to_excel(leads: list[dict], query: str, location: str) -> str:
             lead.get("name", ""),
             lead.get("owner_name", "Owner"),
             lead.get("phone", ""),
+            lead.get("email", ""),
             lead.get("address", ""),
             lead.get("website", ""),
             lead.get("category", ""),
@@ -99,20 +104,23 @@ def export_to_excel(leads: list[dict], query: str, location: str) -> str:
             lead.get("outreach_note", ""),
         ]
         for col, value in enumerate(values, 1):
-            cell            = ws.cell(row=row_idx, column=col, value=value)
-            cell.alignment  = data_align
-            cell.border     = border
+            cell           = ws.cell(row=row_idx, column=col, value=value)
+            cell.alignment = data_align
+            cell.border    = border
             if row_fill:
                 cell.fill = row_fill
+            # Highlight email cells in blue
+            if col == 4 and value:
+                cell.font = email_font
         ws.row_dimensions[row_idx].height = 45
 
     ws.freeze_panes = "A4"
 
-    # ── Summary sheet ──────────────────────────────────────────────
+    # ── Summary sheet
     ws2 = wb.create_sheet("Summary")
     ws2["A1"].value = f"Summary — {query.title()} in {location}"
     ws2["A1"].font  = Font(bold=True, size=14)
-    ws2["A2"].value = f"{len(leads)} total leads"
+    ws2["A2"].value = f"{len(leads)} total leads  |  {emails_found} emails found"
     ws2["A2"].font  = Font(italic=True, color="666666")
 
     sources: dict[str, int] = {}
