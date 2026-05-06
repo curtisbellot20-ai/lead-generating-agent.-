@@ -1,5 +1,11 @@
 import json
+
+from rich.console import Console
+from rich.progress import Progress, SpinnerColumn, BarColumn, TextColumn
+
 from lead_gen import config
+
+console = Console()
 
 SYSTEM_PROMPT = """You are a B2B lead enrichment specialist. Given a list of business leads, your job is to:
 1. Infer the likely owner/decision-maker name from the business name and type (use "Owner" if unknown)
@@ -25,7 +31,7 @@ Rules:
 
 def enrich_leads(leads: list[dict]) -> list[dict]:
     if not config.ANTHROPIC_API_KEY:
-        print("  [Enricher] No ANTHROPIC_API_KEY — skipping AI enrichment")
+        console.print("  [dim]No ANTHROPIC_API_KEY — skipping AI enrichment[/dim]")
         for lead in leads:
             lead["owner_name"] = "Owner"
             lead["outreach_note"] = (
@@ -41,63 +47,79 @@ def enrich_leads(leads: list[dict]) -> list[dict]:
         client = anthropic.Anthropic(api_key=config.ANTHROPIC_API_KEY)
         batch_size = 20
         enriched = []
+        batches = list(range(0, len(leads), batch_size))
 
-        for i in range(0, len(leads), batch_size):
-            batch = leads[i : i + batch_size]
-            leads_payload = json.dumps(
-                [
-                    {
-                        "index": j,
-                        "name": l.get("name", ""),
-                        "phone": l.get("phone", ""),
-                        "address": l.get("address", ""),
-                        "category": l.get("category", ""),
-                        "website": l.get("website", ""),
-                    }
-                    for j, l in enumerate(batch)
-                ],
-                indent=2,
-            )
+        with Progress(
+            SpinnerColumn(),
+            TextColumn("[progress.description]{task.description}"),
+            BarColumn(),
+            TextColumn("[cyan]{task.completed}/{task.total} batches[/cyan]"),
+            console=console,
+            transient=True,
+        ) as progress:
+            task = progress.add_task("Enriching leads...", total=len(batches))
 
-            message = client.messages.create(
-                model="claude-haiku-4-5-20251001",
-                max_tokens=4096,
-                system=[
-                    {
-                        "type": "text",
-                        "text": SYSTEM_PROMPT,
-                        "cache_control": {"type": "ephemeral"},
-                    }
-                ],
-                messages=[
-                    {"role": "user", "content": f"Enrich these leads:\n\n{leads_payload}"}
-                ],
-            )
+            for i in batches:
+                batch = leads[i: i + batch_size]
+                end = min(i + batch_size, len(leads))
+                progress.update(task, description=f"Enriching leads [dim]{i + 1}–{end}[/dim]...")
 
-            text = message.content[0].text.strip()
-            json_start = text.find("[")
-            json_end = text.rfind("]")
-            if json_start != -1 and json_end != -1:
-                results = json.loads(text[json_start : json_end + 1])
-                result_map = {r["index"]: r for r in results}
-                for j, lead in enumerate(batch):
-                    r = result_map.get(j, {})
-                    lead["owner_name"] = r.get("owner_name", "Owner")
-                    lead["outreach_note"] = r.get("outreach_note", "")
-                    lead["industry_tag"] = r.get("industry_tag", "")
-                    enriched.append(lead)
-            else:
-                for lead in batch:
-                    lead["owner_name"] = "Owner"
-                    lead["outreach_note"] = ""
-                    lead["industry_tag"] = ""
-                    enriched.append(lead)
+                leads_payload = json.dumps(
+                    [
+                        {
+                            "index": j,
+                            "name": l.get("name", ""),
+                            "phone": l.get("phone", ""),
+                            "address": l.get("address", ""),
+                            "category": l.get("category", ""),
+                            "website": l.get("website", ""),
+                        }
+                        for j, l in enumerate(batch)
+                    ],
+                    indent=2,
+                )
 
-        print(f"  [Enricher] Enriched {len(enriched)} leads")
+                message = client.messages.create(
+                    model="claude-haiku-4-5-20251001",
+                    max_tokens=4096,
+                    system=[
+                        {
+                            "type": "text",
+                            "text": SYSTEM_PROMPT,
+                            "cache_control": {"type": "ephemeral"},
+                        }
+                    ],
+                    messages=[
+                        {"role": "user", "content": f"Enrich these leads:\n\n{leads_payload}"}
+                    ],
+                )
+
+                text = message.content[0].text.strip()
+                json_start = text.find("[")
+                json_end = text.rfind("]")
+                if json_start != -1 and json_end != -1:
+                    results = json.loads(text[json_start: json_end + 1])
+                    result_map = {r["index"]: r for r in results}
+                    for j, lead in enumerate(batch):
+                        r = result_map.get(j, {})
+                        lead["owner_name"]    = r.get("owner_name", "Owner")
+                        lead["outreach_note"] = r.get("outreach_note", "")
+                        lead["industry_tag"]  = r.get("industry_tag", "")
+                        enriched.append(lead)
+                else:
+                    for lead in batch:
+                        lead["owner_name"]    = "Owner"
+                        lead["outreach_note"] = ""
+                        lead["industry_tag"]  = ""
+                        enriched.append(lead)
+
+                progress.advance(task)
+
+        console.print(f"  Enriched [green]{len(enriched)}[/green] leads with Claude AI")
         return enriched
 
     except Exception as e:
-        print(f"  [Enricher] Error: {e}")
+        console.print(f"  [red]Enricher error:[/red] {e}")
         for lead in leads:
             lead.setdefault("owner_name", "Owner")
             lead.setdefault("outreach_note", "")

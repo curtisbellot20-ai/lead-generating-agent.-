@@ -2,11 +2,16 @@ import re
 import time
 import requests
 from urllib.parse import urljoin
+
+from rich.console import Console
+from rich.progress import Progress, SpinnerColumn, BarColumn, TextColumn
+
 from lead_gen import config
+
+console = Console()
 
 EMAIL_REGEX = re.compile(r"[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}")
 
-# Domains that show up in page source but are never real business emails
 SKIP_DOMAINS = {
     "example.com", "sentry.io", "wixpress.com", "squarespace.com",
     "wordpress.com", "godaddy.com", "schema.org", "w3.org",
@@ -15,13 +20,11 @@ SKIP_DOMAINS = {
     "yellowpages.com", "google.com", "apple.com", "microsoft.com",
 }
 
-# Local parts that are never real contact emails
 SKIP_PREFIXES = {
     "noreply", "no-reply", "donotreply", "mailer-daemon",
     "bounce", "postmaster", "webmaster",
 }
 
-# Contact pages to try in order
 CONTACT_PATHS = [
     "/contact",
     "/contact-us",
@@ -84,10 +87,9 @@ def _extract_emails(html: str) -> list[str]:
             seen.add(e_lower)
             valid.append(e_lower)
 
-    # Prioritise contact/info/hello over generic addresses
     def _priority(e: str) -> int:
         local = e.split("@")[0]
-        return 0 if local in {"contact", "info", "hello", "email", "mail", "hi", "hello"} else 1
+        return 0 if local in {"contact", "info", "hello", "email", "mail", "hi"} else 1
 
     valid.sort(key=_priority)
     return valid
@@ -98,13 +100,11 @@ def _find_for_lead(lead: dict) -> str:
     if not website:
         return ""
 
-    # 1. Try the homepage
     html = _fetch(website)
     emails = _extract_emails(html)
     if emails:
         return emails[0]
 
-    # 2. Try common contact/about pages
     for path in CONTACT_PATHS:
         url = urljoin(website + "/", path.lstrip("/"))
         html = _fetch(url)
@@ -117,26 +117,31 @@ def _find_for_lead(lead: dict) -> str:
 
 
 def find_emails(leads: list[dict]) -> list[dict]:
-    with_site  = [l for l in leads if l.get("website")]
-    no_site    = [l for l in leads if not l.get("website")]
-
-    print(f"  [Email Finder] Checking {len(with_site)} business websites...")
+    with_site = [l for l in leads if l.get("website")]
+    no_site   = [l for l in leads if not l.get("website")]
 
     found = 0
-    for i, lead in enumerate(with_site):
-        email = _find_for_lead(lead)
-        lead["email"] = email
-        if email:
-            found += 1
-            print(f"  [Email Finder] ✓ {lead['name']}: {email}")
-        else:
-            print(f"  [Email Finder] - {lead['name']}: not found")
-        if i < len(with_site) - 1:
-            time.sleep(0.5)
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("[progress.description]{task.description}"),
+        BarColumn(),
+        TextColumn("[cyan]{task.completed}/{task.total}[/cyan]"),
+        console=console,
+        transient=True,
+    ) as progress:
+        task = progress.add_task("Checking websites...", total=len(with_site))
+        for i, lead in enumerate(with_site):
+            progress.update(task, description=f"[dim]{lead['name'][:35]}[/dim]")
+            email = _find_for_lead(lead)
+            lead["email"] = email
+            if email:
+                found += 1
+            progress.advance(task)
+            if i < len(with_site) - 1:
+                time.sleep(0.5)
 
     for lead in no_site:
         lead["email"] = ""
 
-    total = len(with_site)
-    print(f"  [Email Finder] Done — {found}/{total} emails found")
+    console.print(f"  Found [green]{found}[/green] emails from [cyan]{len(with_site)}[/cyan] sites checked")
     return leads
