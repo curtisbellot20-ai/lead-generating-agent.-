@@ -42,6 +42,45 @@ def show_api_status():
     console.print()
 
 
+def _prompt_location() -> str:
+    loc_type = questionary.select(
+        "Search location by:",
+        choices=[
+            questionary.Choice("City & State",  value="city"),
+            questionary.Choice("County",         value="county"),
+            questionary.Choice("Zip Code",       value="zip"),
+        ],
+    ).ask()
+    if loc_type is None:
+        sys.exit(0)
+
+    if loc_type == "city":
+        value = questionary.text(
+            "City & State:",
+            default=config.SEARCH["location"],
+            instruction="e.g. Fort Lauderdale, FL",
+        ).ask()
+
+    elif loc_type == "county":
+        value = questionary.text(
+            "County name:",
+            default="Broward County, FL",
+            instruction="e.g. Broward County, FL",
+        ).ask()
+
+    else:  # zip
+        value = questionary.text(
+            "Zip code:",
+            default="33311",
+            instruction="e.g. 33311  or  33301, 33304  for multiple",
+            validate=lambda v: len(v.strip()) >= 5 or "Enter a valid zip code",
+        ).ask()
+
+    if value is None:
+        sys.exit(0)
+    return value.strip()
+
+
 def prompt_inputs() -> dict:
     console.print("[bold]Configure your search[/bold]")
     console.print()
@@ -53,12 +92,7 @@ def prompt_inputs() -> dict:
     if query is None:
         sys.exit(0)
 
-    location = questionary.text(
-        "Location (city, state):",
-        default=config.SEARCH["location"],
-    ).ask()
-    if location is None:
-        sys.exit(0)
+    location = _prompt_location()
 
     max_per = questionary.text(
         "Max leads per source:",
@@ -91,7 +125,7 @@ def prompt_inputs() -> dict:
     console.print()
     return {
         "query":          query.strip(),
-        "location":       location.strip(),
+        "location":       location,
         "max_per_source": int(max_per),
         "max_pages":      config.SEARCH.get("max_pages", 3),
         "sources":        {s: (s in sources) for s in ["yellow_pages", "yelp", "google_maps", "sunbiz", "chamber", "bni"]},
