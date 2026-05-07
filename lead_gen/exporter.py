@@ -8,6 +8,8 @@ from lead_gen import config
 HEADERS = [
     "Business Name",
     "Owner Name",
+    "Decision Maker",
+    "DM Title",
     "Phone",
     "Email",
     "Address",
@@ -15,28 +17,49 @@ HEADERS = [
     "Instagram",
     "Facebook",
     "TikTok",
+    "LinkedIn",
     "Category",
     "Rating",
     "Reviews",
     "Years in Biz",
+    "Description",
     "Industry Tag",
+    "Registry Agent",
+    "Registry Member",
+    "Registry Status",
     "Source",
     "Outreach Note",
 ]
 
-COL_WIDTHS = [35, 20, 18, 32, 45, 35, 32, 32, 28, 20, 10, 10, 12, 18, 16, 65]
+COL_WIDTHS = [
+    35, 22, 22, 18,          # Business Name, Owner, DM, DM Title
+    18, 34,                  # Phone, Email
+    45, 35,                  # Address, Website
+    30, 30, 26, 30,          # Instagram, Facebook, TikTok, LinkedIn
+    18, 8, 8, 10,            # Category, Rating, Reviews, Years
+    55, 18,                  # Description, Industry Tag
+    22, 22, 14,              # Registry Agent, Member, Status
+    16, 65,                  # Source, Outreach Note
+]
 
-# Column indices (1-based) for link-style formatting
-_EMAIL_COL     = 4
-_INSTAGRAM_COL = 7
-_FACEBOOK_COL  = 8
-_TIKTOK_COL    = 9
-
+# Column indices (1-based) for coloured text
+_COL = {h: i for i, h in enumerate(HEADERS, 1)}
 _LINK_COLORS = {
-    _EMAIL_COL:     "0563C1",  # blue
-    _INSTAGRAM_COL: "C13584",  # Instagram pink/purple
-    _FACEBOOK_COL:  "1877F2",  # Facebook blue
-    _TIKTOK_COL:    "010101",  # TikTok black
+    _COL["Email"]:      "0563C1",
+    _COL["Instagram"]:  "C13584",
+    _COL["Facebook"]:   "1877F2",
+    _COL["TikTok"]:     "010101",
+    _COL["LinkedIn"]:   "0A66C2",
+}
+# Registry columns get a light-blue background to show they are verified
+_REGISTRY_COLS = {_COL["Registry Agent"], _COL["Registry Member"], _COL["Registry Status"]}
+_REG_FILL = PatternFill(start_color="EBF5FB", end_color="EBF5FB", fill_type="solid")
+
+# Owner Name column confidence colours
+_CONF_FONT = {
+    "HIGH":   Font(color="1A7A1A", bold=True),   # green
+    "MEDIUM": Font(color="7D4B00"),              # amber
+    "LOW":    Font(color="999999"),              # grey
 }
 
 
@@ -48,8 +71,8 @@ def _border():
 def export_to_excel(leads: list[dict], query: str, location: str) -> str:
     os.makedirs(config.OUTPUT_DIR, exist_ok=True)
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    slug = query.lower().replace(" ", "_")
-    filename = f"{config.OUTPUT_DIR}/leads_{slug}_{timestamp}.xlsx"
+    slug      = query.lower().replace(" ", "_")
+    filename  = f"{config.OUTPUT_DIR}/leads_{slug}_{timestamp}.xlsx"
 
     wb = Workbook()
     ws = wb.active
@@ -71,15 +94,17 @@ def export_to_excel(leads: list[dict], query: str, location: str) -> str:
     ws.row_dimensions[1].height = 35
 
     # ── Meta row
-    emails_found  = sum(1 for l in leads if l.get("email"))
-    social_found  = sum(1 for l in leads if l.get("instagram") or l.get("facebook") or l.get("tiktok"))
+    emails_found   = sum(1 for l in leads if l.get("email"))
+    social_found   = sum(1 for l in leads if l.get("instagram") or l.get("facebook") or l.get("tiktok"))
+    registry_found = sum(1 for l in leads if l.get("registry_agent") or l.get("registry_member"))
     ws.merge_cells(f"A2:{last_col}2")
     mc = ws["A2"]
     mc.value = (
         f"Generated: {datetime.now().strftime('%B %d, %Y %I:%M %p')}  "
-        f"|  Total Leads: {len(leads)}  "
+        f"|  Leads: {len(leads)}  "
         f"|  Emails: {emails_found}  "
-        f"|  Social Profiles: {social_found}"
+        f"|  Social: {social_found}  "
+        f"|  Registry matches: {registry_found}"
     )
     mc.font      = Font(italic=True, color="666666", size=10)
     mc.alignment = Alignment(horizontal="center")
@@ -100,6 +125,8 @@ def export_to_excel(leads: list[dict], query: str, location: str) -> str:
 
     # ── Data rows
     data_align = Alignment(vertical="center", wrap_text=True)
+    owner_col  = _COL["Owner Name"]
+
     for row_idx, lead in enumerate(leads, 4):
         row_fill = (
             PatternFill(start_color=alt_gray, end_color=alt_gray, fill_type="solid")
@@ -107,7 +134,9 @@ def export_to_excel(leads: list[dict], query: str, location: str) -> str:
         )
         values = [
             lead.get("name", ""),
-            lead.get("owner_name", "Owner"),
+            lead.get("owner_name", ""),
+            lead.get("decision_maker", ""),
+            lead.get("decision_maker_title", ""),
             lead.get("phone", ""),
             lead.get("email", ""),
             lead.get("address", ""),
@@ -115,11 +144,16 @@ def export_to_excel(leads: list[dict], query: str, location: str) -> str:
             lead.get("instagram", ""),
             lead.get("facebook", ""),
             lead.get("tiktok", ""),
+            lead.get("linkedin", ""),
             lead.get("category", ""),
             lead.get("rating", ""),
             lead.get("reviews", ""),
             lead.get("years_in_business", ""),
+            lead.get("description", ""),
             lead.get("industry_tag", ""),
+            lead.get("registry_agent", ""),
+            lead.get("registry_member", ""),
+            lead.get("registry_status", ""),
             lead.get("source", ""),
             lead.get("outreach_note", ""),
         ]
@@ -129,9 +163,20 @@ def export_to_excel(leads: list[dict], query: str, location: str) -> str:
             cell.border    = border
             if row_fill:
                 cell.fill = row_fill
+
+            # Social / email link colour
             if col in _LINK_COLORS and value:
                 cell.font = Font(color=_LINK_COLORS[col], underline="single")
-        ws.row_dimensions[row_idx].height = 45
+            # Owner confidence colour
+            elif col == owner_col and value:
+                conf = lead.get("owner_confidence", "")
+                if conf in _CONF_FONT:
+                    cell.font = _CONF_FONT[conf]
+            # Registry verified background
+            if col in _REGISTRY_COLS and value:
+                cell.fill = _REG_FILL
+
+        ws.row_dimensions[row_idx].height = 50
 
     ws.freeze_panes = "A4"
 
@@ -139,9 +184,7 @@ def export_to_excel(leads: list[dict], query: str, location: str) -> str:
     ws2 = wb.create_sheet("Summary")
     ws2["A1"].value = f"Summary — {query.title()} in {location}"
     ws2["A1"].font  = Font(bold=True, size=14)
-    ws2["A2"].value = (
-        f"{len(leads)} total leads  |  {emails_found} emails  |  {social_found} social profiles found"
-    )
+    ws2["A2"].value = f"{len(leads)} leads  |  {emails_found} emails  |  {social_found} social  |  {registry_found} registry matches"
     ws2["A2"].font  = Font(italic=True, color="666666")
 
     sources: dict[str, int] = {}
@@ -159,7 +202,6 @@ def export_to_excel(leads: list[dict], query: str, location: str) -> str:
         ws2.cell(row=row, column=1, value=src)
         ws2.cell(row=row, column=2, value=cnt)
         row += 1
-
     row += 1
     ws2.cell(row=row, column=1, value="Leads by Industry").font = Font(bold=True)
     row += 1
