@@ -1,4 +1,5 @@
 import asyncio
+import re
 import sys
 
 from rich.console import Console
@@ -11,6 +12,27 @@ from lead_gen import config
 from lead_gen.pipeline import run_pipeline
 
 console = Console()
+
+# Suffixes users often add that hurt scraper results
+_QUERY_NOISE = re.compile(
+    r'\b(technicians?|contractors?|companies|company|services?|specialists?|experts?|professionals?)\b',
+    re.IGNORECASE,
+)
+
+
+def _sanitize_query(raw: str) -> str:
+    """Clean up the user's query so scrapers get the best possible search term."""
+    # Take the last meaningful phrase if commas are present
+    # e.g. "events, venue, event planners" → "event planners"
+    if "," in raw:
+        parts = [p.strip() for p in raw.split(",") if p.strip()]
+        raw = parts[-1] if parts else raw
+
+    # Remove common noise words that confuse SunBiz / structured search
+    cleaned = _QUERY_NOISE.sub("", raw).strip()
+    # Collapse extra whitespace
+    cleaned = re.sub(r'\s+', ' ', cleaned).strip()
+    return cleaned or raw.strip()
 
 
 def _key_status(key: str) -> str:
@@ -82,13 +104,23 @@ def _prompt_location() -> str:
 def prompt_inputs() -> dict:
     console.print("[bold]Configure your search[/bold]")
     console.print()
+    console.print(
+        "[dim]Tip: Use a single short phrase for best results — e.g. [cyan]plumbers[/cyan], "
+        "[cyan]air conditioning[/cyan], [cyan]event planners[/cyan], [cyan]roofers[/cyan][/dim]"
+    )
+    console.print()
 
-    query = questionary.text(
+    raw_query = questionary.text(
         "Business type to search for:",
         default=config.SEARCH["query"],
     ).ask()
-    if query is None:
+    if raw_query is None:
         sys.exit(0)
+
+    query = _sanitize_query(raw_query)
+    if query != raw_query.strip():
+        console.print(f"  [dim]Query cleaned to:[/dim] [cyan]{query}[/cyan]")
+        console.print()
 
     location = _prompt_location()
 
@@ -133,7 +165,7 @@ def prompt_inputs() -> dict:
 
     console.print()
     return {
-        "query":          query.strip(),
+        "query":          query,
         "location":       location,
         "max_per_source": int(max_per),
         "max_pages":      int(max_pages),

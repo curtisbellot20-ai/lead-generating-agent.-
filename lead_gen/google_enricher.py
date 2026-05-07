@@ -5,6 +5,7 @@ we fire a targeted Google search via ScraperAPI and pull info from:
   - The knowledge graph panel (most accurate — shown when Google is confident)
   - The first local_result that name-matches
   - Organic snippet text (owner name, founding year, etc.)
+  - Organic result URLs (website extraction when KG has no website)
 
 Only leads that are actually missing data are searched, to conserve API credits.
 """
@@ -28,7 +29,6 @@ _STRIP_WORDS = {
     "enterprises", "enterprise", "and", "the", "of",
 }
 
-# Patterns to mine owner name from Google snippet text
 _NAME_PATTERNS = [
     re.compile(r'(?:founded|owned|started|established|created|run)\s+by\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+){1,3})', re.IGNORECASE),
     re.compile(r'(?:owner|founder|president|ceo|principal|operator)\s*[:\-–]\s*([A-Z][a-z]+(?:\s+[A-Z][a-z]+){1,3})', re.IGNORECASE),
@@ -40,6 +40,16 @@ _YEAR_PATTERNS = [
     re.compile(r'(?:since|serving since|in business since)\s+((?:19|20)\d{2})', re.IGNORECASE),
     re.compile(r'(\d{1,2})\+?\s+years?\s+(?:of\s+)?(?:experience|in\s+business|serving)', re.IGNORECASE),
 ]
+
+# Skip these TLDs / domains — not real business websites
+_SKIP_DOMAINS = {
+    "google.com", "yelp.com", "yellowpages.com", "bbb.org", "angi.com",
+    "angieslist.com", "facebook.com", "instagram.com", "tiktok.com",
+    "linkedin.com", "twitter.com", "x.com", "mapquest.com", "bing.com",
+    "tripadvisor.com", "thumbtack.com", "houzz.com", "homeadvisor.com",
+    "bark.com", "nextdoor.com", "superpages.com", "manta.com",
+    "chamberofcommerce.com", "sunbiz.org", "wikipedia.org",
+}
 
 CURRENT_YEAR = 2026
 
@@ -89,8 +99,26 @@ def _extract_owner(text: str) -> str:
     return ""
 
 
+def _domain_of(url: str) -> str:
+    """Return bare domain from a URL, e.g. 'www.example.com' → 'example.com'."""
+    url = re.sub(r'^https?://', '', url or "").split('/')[0].lower()
+    return url.lstrip('www.')
+
+
+def _url_matches_name(url: str, name: str) -> bool:
+    """True when the domain looks like it belongs to this business."""
+    domain = _domain_of(url)
+    if not domain:
+        return False
+    if any(skip in domain for skip in _SKIP_DOMAINS):
+        return False
+    # Check if significant words from the business name appear in the domain
+    norm = _normalize(name)
+    words = [w for w in norm.split() if len(w) > 3]
+    return any(w in domain for w in words)
+
+
 def _needs_enrichment(lead: dict) -> bool:
-    """Return True if the lead is missing at least one important field."""
     missing = [
         not lead.get("website"),
         not lead.get("phone"),
@@ -98,19 +126,18 @@ def _needs_enrichment(lead: dict) -> bool:
         not lead.get("owner_name"),
         not lead.get("years_in_business"),
     ]
-    return sum(missing) >= 2  # search only if 2+ fields are missing
+    return sum(missing) >= 2
 
 
 def _build_query(lead: dict) -> str:
     name  = lead.get("name", "")
     phone = lead.get("phone", "")
     addr  = lead.get("address", "")
-    # Extract city from address (last part before state/zip)
     city = ""
     if addr:
         parts = [p.strip() for p in addr.split(",")]
         if len(parts) >= 2:
-            city = parts[-2]  # e.g. "Fort Lauderdale" from "123 Main St, Fort Lauderdale, FL"
+            city = parts[-2]
 
     if phone:
         return f'"{name}" {phone}'
@@ -139,15 +166,13 @@ def _search_google(query: str) -> dict:
 
 
 def _parse_result(lead: dict, data: dict) -> dict:
-    """Extract fields from Google search result and return only the new ones."""
     updates: dict = {}
     lead_name = lead.get("name", "")
 
-    # ── 1. Knowledge graph (highest confidence) ─────────────────
+    # ── 1. Knowledge graph ───────────────────────────────────────
     kg = data.get("knowledge_graph", {})
     if kg and isinstance(kg, dict):
         kg_title = kg.get("title", "")
-        # Only trust KG if the name roughly matches
         if _names_overlap(lead_name, kg_title) or not kg_title:
             if not lead.get("website"):
                 updates["website"] = kg.get("website", "")
@@ -157,7 +182,6 @@ def _parse_result(lead: dict, data: dict) -> dict:
                 updates["address"] = kg.get("address", "")
             if not lead.get("rating"):
                 updates["rating"] = str(kg.get("rating", ""))
-            # Mine description for owner / year
             desc = kg.get("description", "")
             if desc:
                 if not lead.get("owner_name"):
@@ -187,26 +211,35 @@ def _parse_result(lead: dict, data: dict) -> dict:
         if not lead.get("reviews") and not updates.get("reviews"):
             rev = place.get("reviews") or place.get("reviews_count") or place.get("rating_count", "")
             updates["reviews"] = str(rev) if rev else ""
-        break  # only use the first name-matching result
+        break
 
-    # ── 3. Organic snippet text (owner / year mining) ─────────────
-    if not updates.get("owner_name") and not lead.get("owner_name"):
-        for item in data.get("organic_results", data.get("results", []))[:5]:
-            snippet = item.get("snippet", "") + " " + item.get("title", "")
+    # ── 3. Organic results: mine snippets + find website URL ────────
+    organic = data.get("organic_results", data.get("results", []))
+    for item in organic[:6]:
+        if not isinstance(item, dict):
+            continue
+        snippet = (item.get("snippet", "") + " " + item.get("title", "")).strip()
+        url     = item.get("link", item.get("url", ""))
+
+        # Try to find a website URL that looks like it belongs to this business
+        if not lead.get("website") and not updates.get("website"):
+            if url and _url_matches_name(url, lead_name):
+                clean_url = url.split("?")[0].rstrip("/")
+                updates["website"] = clean_url
+
+        # Mine snippet for owner name
+        if not updates.get("owner_name") and not lead.get("owner_name"):
             owner = _extract_owner(snippet)
             if owner:
                 updates["owner_name"] = owner
-                break
 
-    if not updates.get("years_in_business") and not lead.get("years_in_business"):
-        for item in data.get("organic_results", data.get("results", []))[:5]:
-            snippet = item.get("snippet", "") + " " + item.get("title", "")
+        # Mine snippet for years in business
+        if not updates.get("years_in_business") and not lead.get("years_in_business"):
             yib = _extract_year(snippet)
             if yib:
                 updates["years_in_business"] = yib
-                break
 
-    return {k: v for k, v in updates.items() if v}  # drop empty strings
+    return {k: v for k, v in updates.items() if v}
 
 
 def enrich(leads: list[dict]) -> list[dict]:
@@ -234,8 +267,8 @@ def enrich(leads: list[dict]) -> list[dict]:
 
         for i, lead in enumerate(to_search):
             progress.update(task, description=f"[dim]Searching: {lead['name'][:35]}[/dim]")
-            query  = _build_query(lead)
-            data   = _search_google(query)
+            query   = _build_query(lead)
+            data    = _search_google(query)
             updates = _parse_result(lead, data)
 
             if updates:
@@ -244,7 +277,7 @@ def enrich(leads: list[dict]) -> list[dict]:
 
             progress.advance(task)
             if i < len(to_search) - 1:
-                time.sleep(0.4)  # be polite to the API
+                time.sleep(0.4)
 
     console.print(
         f"  Google search enriched [green]{filled_count}[/green] of "
