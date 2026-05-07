@@ -10,6 +10,7 @@ from rich import box
 from lead_gen import config
 from lead_gen.enricher import enrich_leads
 from lead_gen.email_finder import find_emails
+from lead_gen.google_enricher import enrich as google_enrich
 from lead_gen.exporter import export_to_excel
 from lead_gen.scrapers import yellow_pages, yelp, chamber, bni, sunbiz, google_maps, bbb, angi
 
@@ -49,10 +50,9 @@ def _names_match(a: str, b: str) -> bool:
 
 
 def _merge(primary: dict, secondary: dict) -> dict:
-    """Fill empty fields in primary from secondary without overwriting existing data."""
     merged = primary.copy()
     for key, value in secondary.items():
-        if key in ("name", "source"):  # always keep primary values for these
+        if key in ("name", "source"):
             continue
         if not merged.get(key) and value:
             merged[key] = value
@@ -60,10 +60,7 @@ def _merge(primary: dict, secondary: dict) -> dict:
 
 
 def cross_reference(primary: list[dict], secondary: list[dict]) -> list[dict]:
-    """
-    Merge secondary source data into matching primary leads.
-    Unmatched secondary leads are appended at the end.
-    """
+    """Merge secondary source data into matching primary leads."""
     matched_idx: set[int] = set()
     result: list[dict] = []
 
@@ -83,7 +80,6 @@ def cross_reference(primary: list[dict], secondary: list[dict]) -> list[dict]:
 
         result.append(merged)
 
-    # Append secondary leads that had no match in primary
     for i, sec in enumerate(secondary):
         if i not in matched_idx:
             result.append(sec)
@@ -174,40 +170,50 @@ async def run_pipeline(params: dict | None = None):
             secondary_leads.extend(bni.scrape(config.BNI_CHAPTER_URLS, max_per))
             progress.advance(task)
 
-    # ── Cross-reference or simple deduplicate ───────────────────────
+    # ── Cross-reference ───────────────────────────────────────────────
     if primary_leads:
         console.print(f"  Google Maps: [cyan]{len(primary_leads)}[/cyan] primary leads")
         console.print(f"  Other sources: [cyan]{len(secondary_leads)}[/cyan] secondary leads")
         console.print("  Cross-referencing to fill missing fields...")
         all_leads = cross_reference(primary_leads, secondary_leads)
         all_leads = deduplicate(all_leads)
-        console.print(f"  Result: [green]{len(all_leads)}[/green] leads with merged data\n")
+        console.print(f"  Result: [green]{len(all_leads)}[/green] leads after merge\n")
     else:
         all_leads = deduplicate(primary_leads + secondary_leads)
         console.print(f"  Collected [green]{len(all_leads)}[/green] leads after deduplication\n")
 
-    # ── Email + social ──────────────────────────────────────────
-    console.rule("[bold]Finding email addresses & social profiles[/bold]")
+    # ── Google search enrichment (fills remaining gaps per-lead) ────────
+    console.rule("[bold]Google search enrichment[/bold]")
+    all_leads = google_enrich(all_leads)
+    console.print()
+
+    # ── Website visit: email + social + About Us ─────────────────────
+    console.rule("[bold]Visiting websites (email, social, About Us)[/bold]")
     all_leads = find_emails(all_leads)
     console.print()
 
-    # ── AI enrichment ─────────────────────────────────────────
+    # ── Claude AI enrichment (outreach notes + industry tag) ──────────
     console.rule("[bold]Enriching with Claude AI[/bold]")
     all_leads = enrich_leads(all_leads)
     console.print()
 
-    # ── Export ───────────────────────────────────────────────
+    # ── Export ───────────────────────────────────────────────────
     console.rule("[bold]Exporting[/bold]")
     output_file = export_to_excel(all_leads, query, location)
 
-    emails_found = sum(1 for l in all_leads if l.get("email"))
+    emails_found  = sum(1 for l in all_leads if l.get("email"))
+    social_found  = sum(1 for l in all_leads if l.get("instagram") or l.get("facebook") or l.get("tiktok"))
+    owners_found  = sum(1 for l in all_leads if l.get("owner_name") and l["owner_name"] != "Owner")
+
     summary = Table(box=box.ROUNDED, show_header=False, padding=(0, 2), border_style="green")
     summary.add_column(style="dim")
     summary.add_column(style="bold")
-    summary.add_row("Query",        f"{query} in {location}")
-    summary.add_row("Total leads",  str(len(all_leads)))
-    summary.add_row("Emails found", f"{emails_found} / {len(all_leads)}")
-    summary.add_row("Saved to",     f"[cyan]{output_file}[/cyan]")
+    summary.add_row("Query",         f"{query} in {location}")
+    summary.add_row("Total leads",   str(len(all_leads)))
+    summary.add_row("Emails found",  f"{emails_found} / {len(all_leads)}")
+    summary.add_row("Social profiles", f"{social_found} / {len(all_leads)}")
+    summary.add_row("Owner names",   f"{owners_found} / {len(all_leads)}")
+    summary.add_row("Saved to",      f"[cyan]{output_file}[/cyan]")
 
     console.print()
     console.print(Panel(summary, title="[bold green] Done! [/bold green]", border_style="green"))
