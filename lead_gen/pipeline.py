@@ -10,7 +10,7 @@ from lead_gen import config
 from lead_gen.enricher import enrich_leads
 from lead_gen.email_finder import find_emails
 from lead_gen.exporter import export_to_excel
-from lead_gen.scrapers import yellow_pages, yelp, chamber, bni
+from lead_gen.scrapers import yellow_pages, yelp, chamber, bni, sunbiz
 
 console = Console()
 
@@ -64,6 +64,11 @@ async def run_pipeline(params: dict | None = None):
         if sources.get("yelp"):
             progress.update(task, description="Scraping [bold]Yelp[/bold]...")
             all_leads.extend(yelp.scrape(query, location, max_per, max_pg))
+            progress.advance(task)
+
+        if sources.get("sunbiz"):
+            progress.update(task, description="Scraping [bold]SunBiz[/bold]...")
+            all_leads.extend(sunbiz.scrape(query, location, max_per, max_pg))
             progress.advance(task)
 
         if sources.get("chamber"):
