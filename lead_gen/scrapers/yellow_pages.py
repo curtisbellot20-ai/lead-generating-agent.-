@@ -25,7 +25,6 @@ def _get_page(query: str, location: str, page: int) -> str | None:
         "geo_location_terms": location,
         "page": page,
     }
-    # Build target URL manually for ScraperAPI
     param_str = "&".join(f"{k}={str(v).replace(' ', '+')}" for k, v in params.items())
     target = f"{BASE_URL}?{param_str}"
     proxy = (
@@ -35,7 +34,7 @@ def _get_page(query: str, location: str, page: int) -> str | None:
         f"&render=true"
     )
     try:
-        resp = requests.get(proxy, timeout=45)
+        resp = requests.get(proxy, timeout=90)   # 90s — YP pages can be slow
         resp.raise_for_status()
         return resp.text
     except Exception as e:
@@ -48,7 +47,6 @@ def _parse_listings(html: str) -> list[dict]:
     leads = []
 
     for listing in soup.select(".result, .organic, [class*='result']"):
-        # Skip ads
         if listing.select_one(".sponsored-label, .ad-label"):
             continue
 
@@ -77,15 +75,15 @@ def _parse_listings(html: str) -> list[dict]:
             website = href if href.startswith("http") else ""
 
         leads.append({
-            "name": name,
-            "phone": phone_el.get_text(strip=True) if phone_el else "",
-            "address": address,
-            "website": website,
-            "category": cat_el.get_text(strip=True) if cat_el else "",
-            "rating": rating_el.get_text(strip=True) if rating_el else "",
-            "reviews": review_el.get_text(strip=True).strip("()") if review_el else "",
+            "name":             name,
+            "phone":            phone_el.get_text(strip=True) if phone_el else "",
+            "address":          address,
+            "website":          website,
+            "category":         cat_el.get_text(strip=True) if cat_el else "",
+            "rating":           rating_el.get_text(strip=True) if rating_el else "",
+            "reviews":          review_el.get_text(strip=True).strip("()") if review_el else "",
             "years_in_business": years_el.get_text(strip=True) if years_el else "",
-            "source": "Yellow Pages",
+            "source":           "Yellow Pages",
         })
 
     return leads
@@ -116,7 +114,7 @@ def scrape(query: str, location: str, max_results: int = 40, max_pages: int = 3)
             break
 
         if page < max_pages:
-            time.sleep(1.5)  # be polite between pages
+            time.sleep(1.5)
 
     all_leads = all_leads[:max_results]
     print(f"  [Yellow Pages] Done — {len(all_leads)} leads collected")

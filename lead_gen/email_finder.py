@@ -37,9 +37,17 @@ SKIP_PREFIXES = {
     "bounce", "postmaster", "webmaster",
 }
 
+# Pages checked for email / social media
 CONTACT_PATHS = [
     "/contact", "/contact-us", "/contact_us", "/contactus",
     "/about", "/about-us", "/reach-us", "/get-in-touch",
+]
+
+# Pages checked for owner name / founding year
+ABOUT_PATHS = [
+    "/about", "/about-us", "/about_us", "/our-story", "/our-team",
+    "/meet-the-team", "/team", "/who-we-are", "/company",
+    "/founders", "/owner",
 ]
 
 HEADERS = {
@@ -49,6 +57,35 @@ HEADERS = {
         "Chrome/120.0.0.0 Safari/537.36"
     )
 }
+
+# ── Name extraction patterns ──────────────────────────────────────────────────
+# Captures a 2-4 word proper-noun name following common ownership/intro phrases
+_NAME_PATTERNS = [
+    # "Founded by John Smith" / "owned by Jane Doe"
+    re.compile(r'(?:founded|owned|started|established|created|run)\s+by\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+){1,3})', re.IGNORECASE),
+    # "Owner: John Smith" / "CEO: John Smith"
+    re.compile(r'(?:owner|founder|president|ceo|principal|operator|proprietor)\s*[:\-–]\s*([A-Z][a-z]+(?:\s+[A-Z][a-z]+){1,3})', re.IGNORECASE),
+    # "Hi, I'm John Smith" / "I am Jane Doe"
+    re.compile(r"(?:I'?m|I am|my name is)\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+){1,3})", re.IGNORECASE),
+    # "Meet John Smith, owner" — name first, role second
+    re.compile(r'[Mm]eet\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+){1,3})\s*,?\s*(?:owner|founder|president|ceo)', re.IGNORECASE),
+    # JSON-LD / schema.org  "name": "John Smith"
+    re.compile(r'"(?:name|givenName|familyName)"\s*:\s*"([A-Z][a-z]+(?:\s+[A-Z][a-z]+){1,3})"'),
+]
+
+# ── Founding year extraction patterns ────────────────────────────────────────
+_YEAR_PATTERNS = [
+    # "Founded in 1998" / "Established in 2001" / "Est. 2003"
+    re.compile(r'(?:founded|established|est\.?|incorporated|started|opened|began)\s+(?:in\s+)?((?:19|20)\d{2})', re.IGNORECASE),
+    # "Since 1998" / "serving since 2005"
+    re.compile(r'(?:since|serving since|in business since)\s+((?:19|20)\d{2})', re.IGNORECASE),
+    # "© 1998" (earliest copyright year often = founding)
+    re.compile(r'(?:©|&copy;|copyright)\s*((?:19|20)\d{2})'),
+    # "over 20 years" / "25+ years of experience"
+    re.compile(r'(\d{1,2})\+?\s+years?\s+(?:of\s+)?(?:experience|in\s+business|serving)', re.IGNORECASE),
+]
+
+CURRENT_YEAR = 2026
 
 
 def _normalize_url(url: str) -> str:
@@ -115,25 +152,63 @@ def _extract_social_links(html: str) -> dict:
     return links
 
 
+def _extract_owner_name(html: str) -> str:
+    """Try to pull an owner / founder name from page HTML."""
+    # Strip tags to reduce noise before regex matching
+    text = re.sub(r'<[^>]+>', ' ', html)
+    text = re.sub(r'\s+', ' ', text)
+    for pattern in _NAME_PATTERNS:
+        m = pattern.search(text)
+        if m:
+            name = m.group(1).strip()
+            # Reject obvious non-names (all caps, very long, contains digits)
+            if len(name) <= 40 and not re.search(r'\d', name) and not name.isupper():
+                return name
+    return ""
+
+
+def _extract_years_in_business(html: str) -> str:
+    """Try to pull founding year or years-in-business from page HTML."""
+    text = re.sub(r'<[^>]+>', ' ', html)
+    text = re.sub(r'\s+', ' ', text)
+    for pattern in _YEAR_PATTERNS:
+        m = pattern.search(text)
+        if m:
+            val = m.group(1).strip()
+            # If it looks like a year (4 digits), convert to years-in-business
+            if re.fullmatch(r'(?:19|20)\d{2}', val):
+                year = int(val)
+                if 1900 < year <= CURRENT_YEAR:
+                    return str(CURRENT_YEAR - year)
+            else:
+                # It's already a "X years" number
+                num = int(val)
+                if 1 <= num <= 100:
+                    return str(num)
+    return ""
+
+
 def _find_for_lead(lead: dict) -> dict:
     website = _normalize_url(lead.get("website", ""))
     if not website:
-        return {"email": "", "instagram": "", "facebook": "", "tiktok": ""}
+        return {"email": "", "instagram": "", "facebook": "", "tiktok": "",
+                "owner_name": "", "years_in_business": ""}
 
-    all_html = ""
-    email = ""
+    all_html   = ""
+    about_html = ""
+    email      = ""
 
-    # Check homepage first
+    # ── Homepage ──────────────────────────────────────────────────────
     html = _fetch(website)
     all_html += html
     emails = _extract_emails(html)
     if emails:
         email = emails[0]
 
-    # Check contact/about pages if no email yet
+    # ── Contact / About pages (email + social) ────────────────────────
     if not email:
         for path in CONTACT_PATHS:
-            url = urljoin(website + "/", path.lstrip("/"))
+            url  = urljoin(website + "/", path.lstrip("/"))
             html = _fetch(url)
             all_html += html
             emails = _extract_emails(html)
@@ -142,12 +217,28 @@ def _find_for_lead(lead: dict) -> dict:
                 break
             time.sleep(0.3)
 
+    # ── About pages (owner name + years) ─────────────────────────────
+    # Try /about-us style pages; use homepage HTML as fallback
+    for path in ABOUT_PATHS:
+        url  = urljoin(website + "/", path.lstrip("/"))
+        html = _fetch(url)
+        if html and len(html) > 500:   # ignore empty/redirect pages
+            about_html += html
+            break
+        time.sleep(0.2)
+
+    combined = about_html or all_html
+    owner_name       = _extract_owner_name(combined)
+    years_in_business = _extract_years_in_business(combined)
+
     social = _extract_social_links(all_html)
     return {
-        "email":     email,
-        "instagram": social.get("instagram", ""),
-        "facebook":  social.get("facebook", ""),
-        "tiktok":    social.get("tiktok", ""),
+        "email":            email,
+        "instagram":        social.get("instagram", ""),
+        "facebook":         social.get("facebook",  ""),
+        "tiktok":           social.get("tiktok",    ""),
+        "owner_name":       owner_name,
+        "years_in_business": years_in_business,
     }
 
 
@@ -155,8 +246,10 @@ def find_emails(leads: list[dict]) -> list[dict]:
     with_site = [l for l in leads if l.get("website")]
     no_site   = [l for l in leads if not l.get("website")]
 
-    emails_found = 0
-    social_found = 0
+    emails_found  = 0
+    social_found  = 0
+    owners_found  = 0
+    years_found   = 0
 
     with Progress(
         SpinnerColumn(),
@@ -170,14 +263,27 @@ def find_emails(leads: list[dict]) -> list[dict]:
         for i, lead in enumerate(with_site):
             progress.update(task, description=f"[dim]{lead['name'][:35]}[/dim]")
             result = _find_for_lead(lead)
+
             lead["email"]     = result["email"]
             lead["instagram"] = result["instagram"]
             lead["facebook"]  = result["facebook"]
             lead["tiktok"]    = result["tiktok"]
+
+            # Only fill in if the field is currently empty
+            if not lead.get("owner_name") and result["owner_name"]:
+                lead["owner_name"] = result["owner_name"]
+            if not lead.get("years_in_business") and result["years_in_business"]:
+                lead["years_in_business"] = result["years_in_business"]
+
             if result["email"]:
                 emails_found += 1
             if any([result["instagram"], result["facebook"], result["tiktok"]]):
                 social_found += 1
+            if result["owner_name"]:
+                owners_found += 1
+            if result["years_in_business"]:
+                years_found += 1
+
             progress.advance(task)
             if i < len(with_site) - 1:
                 time.sleep(0.5)
@@ -189,8 +295,10 @@ def find_emails(leads: list[dict]) -> list[dict]:
         lead["tiktok"]    = ""
 
     console.print(
-        f"  Found [green]{emails_found}[/green] emails and "
-        f"[magenta]{social_found}[/magenta] social profiles "
+        f"  Found [green]{emails_found}[/green] emails, "
+        f"[magenta]{social_found}[/magenta] social profiles, "
+        f"[yellow]{owners_found}[/yellow] owner names, "
+        f"[blue]{years_found}[/blue] founding years "
         f"from [cyan]{len(with_site)}[/cyan] sites checked"
     )
     return leads
