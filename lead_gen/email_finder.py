@@ -1,6 +1,7 @@
 import re
 import time
 import requests
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from urllib.parse import urljoin
 
 from rich.console import Console
@@ -37,18 +38,9 @@ SKIP_PREFIXES = {
     "bounce", "postmaster", "webmaster",
 }
 
-# Pages checked for email / social media
-CONTACT_PATHS = [
-    "/contact", "/contact-us", "/contact_us", "/contactus",
-    "/about", "/about-us", "/reach-us", "/get-in-touch",
-]
-
-# Pages checked for owner name / founding year
-ABOUT_PATHS = [
-    "/about", "/about-us", "/about_us", "/our-story", "/our-team",
-    "/meet-the-team", "/team", "/who-we-are", "/company",
-    "/founders", "/owner",
-]
+# Ordered by most likely to have useful content — stop at first hit
+CONTACT_PATHS = ["/contact", "/contact-us", "/about", "/about-us"]
+ABOUT_PATHS   = ["/about", "/about-us", "/our-story", "/our-team", "/team", "/who-we-are"]
 
 HEADERS = {
     "User-Agent": (
@@ -58,39 +50,27 @@ HEADERS = {
     )
 }
 
-# ── Name extraction patterns ──────────────────────────────────────────────────
-# Captures a 2-4 word proper-noun name following common ownership/intro phrases
+# ── Owner / year extraction ────────────────────────────────────────────
 _NAME_PATTERNS = [
-    # "Founded by John Smith" / "owned by Jane Doe"
     re.compile(r'(?:founded|owned|started|established|created|run)\s+by\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+){1,3})', re.IGNORECASE),
-    # "Owner: John Smith" / "CEO: John Smith"
     re.compile(r'(?:owner|founder|president|ceo|principal|operator|proprietor)\s*[:\-–]\s*([A-Z][a-z]+(?:\s+[A-Z][a-z]+){1,3})', re.IGNORECASE),
-    # "Hi, I'm John Smith" / "I am Jane Doe"
     re.compile(r"(?:I'?m|I am|my name is)\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+){1,3})", re.IGNORECASE),
-    # "Meet John Smith, owner" — name first, role second
     re.compile(r'[Mm]eet\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+){1,3})\s*,?\s*(?:owner|founder|president|ceo)', re.IGNORECASE),
-    # JSON-LD / schema.org  "name": "John Smith"
-    re.compile(r'"(?:name|givenName|familyName)"\s*:\s*"([A-Z][a-z]+(?:\s+[A-Z][a-z]+){1,3})"'),
+    re.compile(r'"(?:name|givenName)"\s*:\s*"([A-Z][a-z]+(?:\s+[A-Z][a-z]+){1,3})"'),
 ]
 
-# ── Founding year extraction patterns ────────────────────────────────────────
 _YEAR_PATTERNS = [
-    # "Founded in 1998" / "Established in 2001" / "Est. 2003"
     re.compile(r'(?:founded|established|est\.?|incorporated|started|opened|began)\s+(?:in\s+)?((?:19|20)\d{2})', re.IGNORECASE),
-    # "Since 1998" / "serving since 2005"
     re.compile(r'(?:since|serving since|in business since)\s+((?:19|20)\d{2})', re.IGNORECASE),
-    # "© 1998" (earliest copyright year often = founding)
     re.compile(r'(?:©|&copy;|copyright)\s*((?:19|20)\d{2})'),
-    # "over 20 years" / "25+ years of experience"
     re.compile(r'(\d{1,2})\+?\s+years?\s+(?:of\s+)?(?:experience|in\s+business|serving)', re.IGNORECASE),
 ]
 
 CURRENT_YEAR = 2026
+WORKERS      = 6   # parallel website visits
 
 
 def _normalize_url(url: str) -> str:
-    if not url:
-        return ""
     url = url.strip()
     if not url.startswith("http"):
         url = "https://" + url
@@ -101,18 +81,14 @@ def _is_valid_email(email: str) -> bool:
     if "@" not in email:
         return False
     local, domain = email.lower().rsplit("@", 1)
-    if domain in SKIP_DOMAINS:
+    if domain in SKIP_DOMAINS or any(local.startswith(p) for p in SKIP_PREFIXES):
         return False
-    if any(local.startswith(p) for p in SKIP_PREFIXES):
-        return False
-    if len(local) < 2 or "." not in domain:
-        return False
-    return True
+    return len(local) >= 2 and "." in domain
 
 
-def _fetch(url: str) -> str:
+def _fetch(url: str, timeout: int = 7) -> str:
     try:
-        resp = requests.get(url, headers=HEADERS, timeout=10, allow_redirects=True)
+        resp = requests.get(url, headers=HEADERS, timeout=timeout, allow_redirects=True)
         if resp.ok:
             return resp.text
     except Exception:
@@ -120,68 +96,51 @@ def _fetch(url: str) -> str:
     return ""
 
 
-def _extract_emails(html: str) -> list[str]:
-    raw = EMAIL_REGEX.findall(html)
-    seen: set[str] = set()
-    valid: list[str] = []
-    for e in raw:
-        e_lower = e.lower()
-        if e_lower not in seen and _is_valid_email(e_lower):
-            seen.add(e_lower)
-            valid.append(e_lower)
-
-    def _priority(e: str) -> int:
-        local = e.split("@")[0]
-        return 0 if local in {"contact", "info", "hello", "email", "mail", "hi"} else 1
-
-    valid.sort(key=_priority)
-    return valid
+def _best_email(html: str) -> str:
+    raw   = EMAIL_REGEX.findall(html)
+    valid = [e.lower() for e in raw if _is_valid_email(e.lower())]
+    priority = [e for e in valid if e.split("@")[0] in {"contact", "info", "hello", "email", "mail", "hi"}]
+    return (priority or valid or [""])[0]
 
 
-def _extract_social_links(html: str) -> dict:
+def _extract_social(html: str) -> dict:
     links = {}
     for platform, regex in SOCIAL_REGEX.items():
-        for match in regex.finditer(html):
-            handle = match.group(1).strip("/").split("?")[0].split("&")[0]
+        for m in regex.finditer(html):
+            handle = m.group(1).strip("/").split("?")[0].split("&")[0]
             if handle and handle.lower() not in SKIP_HANDLES[platform] and len(handle) > 1:
-                if platform == "tiktok":
-                    links[platform] = f"https://www.tiktok.com/@{handle}"
-                else:
-                    links[platform] = f"https://www.{platform}.com/{handle}"
+                links[platform] = (
+                    f"https://www.tiktok.com/@{handle}" if platform == "tiktok"
+                    else f"https://www.{platform}.com/{handle}"
+                )
                 break
     return links
 
 
-def _extract_owner_name(html: str) -> str:
-    """Try to pull an owner / founder name from page HTML."""
-    # Strip tags to reduce noise before regex matching
-    text = re.sub(r'<[^>]+>', ' ', html)
+def _extract_owner(text: str) -> str:
+    text = re.sub(r'<[^>]+>', ' ', text)
     text = re.sub(r'\s+', ' ', text)
-    for pattern in _NAME_PATTERNS:
-        m = pattern.search(text)
+    for p in _NAME_PATTERNS:
+        m = p.search(text)
         if m:
             name = m.group(1).strip()
-            # Reject obvious non-names (all caps, very long, contains digits)
             if len(name) <= 40 and not re.search(r'\d', name) and not name.isupper():
                 return name
     return ""
 
 
-def _extract_years_in_business(html: str) -> str:
-    """Try to pull founding year or years-in-business from page HTML."""
-    text = re.sub(r'<[^>]+>', ' ', html)
+def _extract_year(text: str) -> str:
+    text = re.sub(r'<[^>]+>', ' ', text)
     text = re.sub(r'\s+', ' ', text)
-    for pattern in _YEAR_PATTERNS:
-        m = pattern.search(text)
+    for p in _YEAR_PATTERNS:
+        m = p.search(text)
         if m:
             val = m.group(1).strip()
-            # If it looks like a year (4 digits), convert to years-in-business
             if re.fullmatch(r'(?:19|20)\d{2}', val):
                 year = int(val)
                 if 1900 < year <= CURRENT_YEAR:
                     return str(CURRENT_YEAR - year)
             else:
-                # It's already a "X years" number
                 num = int(val)
                 if 1 <= num <= 100:
                     return str(num)
@@ -189,56 +148,58 @@ def _extract_years_in_business(html: str) -> str:
 
 
 def _find_for_lead(lead: dict) -> dict:
+    """Visit a lead's website and extract email, social, owner name, years."""
     website = _normalize_url(lead.get("website", ""))
+    empty = {"email": "", "instagram": "", "facebook": "", "tiktok": "",
+             "owner_name": "", "years_in_business": ""}
     if not website:
-        return {"email": "", "instagram": "", "facebook": "", "tiktok": "",
-                "owner_name": "", "years_in_business": ""}
+        return empty
+
+    already_has_owner = bool(lead.get("owner_name"))
+    already_has_years = bool(lead.get("years_in_business"))
 
     all_html   = ""
     about_html = ""
     email      = ""
 
-    # ── Homepage ──────────────────────────────────────────────────────
+    # Homepage
     html = _fetch(website)
     all_html += html
-    emails = _extract_emails(html)
-    if emails:
-        email = emails[0]
+    email = _best_email(html)
 
-    # ── Contact / About pages (email + social) ────────────────────────
+    # One contact/about page if still no email
     if not email:
         for path in CONTACT_PATHS:
             url  = urljoin(website + "/", path.lstrip("/"))
             html = _fetch(url)
+            if not html:
+                continue
             all_html += html
-            emails = _extract_emails(html)
-            if emails:
-                email = emails[0]
+            email = _best_email(html)
+            if email:
                 break
-            time.sleep(0.3)
 
-    # ── About pages (owner name + years) ─────────────────────────────
-    # Try /about-us style pages; use homepage HTML as fallback
-    for path in ABOUT_PATHS:
-        url  = urljoin(website + "/", path.lstrip("/"))
-        html = _fetch(url)
-        if html and len(html) > 500:   # ignore empty/redirect pages
-            about_html += html
-            break
-        time.sleep(0.2)
+    # One about page for owner / year (skip if already filled from Google enrichment)
+    if not already_has_owner or not already_has_years:
+        for path in ABOUT_PATHS:
+            url  = urljoin(website + "/", path.lstrip("/"))
+            html = _fetch(url)
+            if html and len(html) > 500:
+                about_html = html
+                break
 
     combined = about_html or all_html
-    owner_name       = _extract_owner_name(combined)
-    years_in_business = _extract_years_in_business(combined)
+    owner = "" if already_has_owner else _extract_owner(combined)
+    years = "" if already_has_years else _extract_year(combined)
 
-    social = _extract_social_links(all_html)
+    social = _extract_social(all_html)
     return {
-        "email":            email,
-        "instagram":        social.get("instagram", ""),
-        "facebook":         social.get("facebook",  ""),
-        "tiktok":           social.get("tiktok",    ""),
-        "owner_name":       owner_name,
-        "years_in_business": years_in_business,
+        "email":             email,
+        "instagram":         social.get("instagram", ""),
+        "facebook":          social.get("facebook",  ""),
+        "tiktok":            social.get("tiktok",    ""),
+        "owner_name":        owner,
+        "years_in_business": years,
     }
 
 
@@ -246,10 +207,7 @@ def find_emails(leads: list[dict]) -> list[dict]:
     with_site = [l for l in leads if l.get("website")]
     no_site   = [l for l in leads if not l.get("website")]
 
-    emails_found  = 0
-    social_found  = 0
-    owners_found  = 0
-    years_found   = 0
+    emails_found = social_found = owners_found = years_found = 0
 
     with Progress(
         SpinnerColumn(),
@@ -259,40 +217,37 @@ def find_emails(leads: list[dict]) -> list[dict]:
         console=console,
         transient=True,
     ) as progress:
-        task = progress.add_task("Checking websites...", total=len(with_site))
-        for i, lead in enumerate(with_site):
-            progress.update(task, description=f"[dim]{lead['name'][:35]}[/dim]")
-            result = _find_for_lead(lead)
+        task = progress.add_task(
+            f"Visiting {len(with_site)} sites ({WORKERS} at a time)...",
+            total=len(with_site),
+        )
 
-            lead["email"]     = result["email"]
-            lead["instagram"] = result["instagram"]
-            lead["facebook"]  = result["facebook"]
-            lead["tiktok"]    = result["tiktok"]
+        with ThreadPoolExecutor(max_workers=WORKERS) as pool:
+            futures = {pool.submit(_find_for_lead, lead): lead for lead in with_site}
+            for future in as_completed(futures):
+                lead   = futures[future]
+                result = future.result()
 
-            # Only fill in if the field is currently empty
-            if not lead.get("owner_name") and result["owner_name"]:
-                lead["owner_name"] = result["owner_name"]
-            if not lead.get("years_in_business") and result["years_in_business"]:
-                lead["years_in_business"] = result["years_in_business"]
+                lead["email"]     = result["email"]
+                lead["instagram"] = result["instagram"]
+                lead["facebook"]  = result["facebook"]
+                lead["tiktok"]    = result["tiktok"]
 
-            if result["email"]:
-                emails_found += 1
-            if any([result["instagram"], result["facebook"], result["tiktok"]]):
-                social_found += 1
-            if result["owner_name"]:
-                owners_found += 1
-            if result["years_in_business"]:
-                years_found += 1
+                if not lead.get("owner_name") and result["owner_name"]:
+                    lead["owner_name"] = result["owner_name"]
+                if not lead.get("years_in_business") and result["years_in_business"]:
+                    lead["years_in_business"] = result["years_in_business"]
 
-            progress.advance(task)
-            if i < len(with_site) - 1:
-                time.sleep(0.5)
+                if result["email"]:      emails_found += 1
+                if any([result["instagram"], result["facebook"], result["tiktok"]]): social_found += 1
+                if result["owner_name"]: owners_found += 1
+                if result["years_in_business"]: years_found += 1
+
+                progress.update(task, description=f"[dim]{lead['name'][:35]}[/dim]")
+                progress.advance(task)
 
     for lead in no_site:
-        lead["email"]     = ""
-        lead["instagram"] = ""
-        lead["facebook"]  = ""
-        lead["tiktok"]    = ""
+        lead.update({"email": "", "instagram": "", "facebook": "", "tiktok": ""})
 
     console.print(
         f"  Found [green]{emails_found}[/green] emails, "
