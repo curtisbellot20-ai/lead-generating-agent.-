@@ -12,6 +12,9 @@ HEADERS = [
     "Email",
     "Address",
     "Website",
+    "Instagram",
+    "Facebook",
+    "TikTok",
     "Category",
     "Rating",
     "Reviews",
@@ -21,7 +24,20 @@ HEADERS = [
     "Outreach Note",
 ]
 
-COL_WIDTHS = [35, 20, 18, 32, 45, 35, 20, 10, 10, 12, 18, 16, 65]
+COL_WIDTHS = [35, 20, 18, 32, 45, 35, 32, 32, 28, 20, 10, 10, 12, 18, 16, 65]
+
+# Column indices (1-based) for link-style formatting
+_EMAIL_COL     = 4
+_INSTAGRAM_COL = 7
+_FACEBOOK_COL  = 8
+_TIKTOK_COL    = 9
+
+_LINK_COLORS = {
+    _EMAIL_COL:     "0563C1",  # blue
+    _INSTAGRAM_COL: "C13584",  # Instagram pink/purple
+    _FACEBOOK_COL:  "1877F2",  # Facebook blue
+    _TIKTOK_COL:    "010101",  # TikTok black
+}
 
 
 def _border():
@@ -55,13 +71,15 @@ def export_to_excel(leads: list[dict], query: str, location: str) -> str:
     ws.row_dimensions[1].height = 35
 
     # ── Meta row
-    emails_found = sum(1 for l in leads if l.get("email"))
+    emails_found  = sum(1 for l in leads if l.get("email"))
+    social_found  = sum(1 for l in leads if l.get("instagram") or l.get("facebook") or l.get("tiktok"))
     ws.merge_cells(f"A2:{last_col}2")
     mc = ws["A2"]
     mc.value = (
         f"Generated: {datetime.now().strftime('%B %d, %Y %I:%M %p')}  "
         f"|  Total Leads: {len(leads)}  "
-        f"|  Emails Found: {emails_found}"
+        f"|  Emails: {emails_found}  "
+        f"|  Social Profiles: {social_found}"
     )
     mc.font      = Font(italic=True, color="666666", size=10)
     mc.alignment = Alignment(horizontal="center")
@@ -81,8 +99,7 @@ def export_to_excel(leads: list[dict], query: str, location: str) -> str:
     ws.row_dimensions[3].height = 30
 
     # ── Data rows
-    data_align  = Alignment(vertical="center", wrap_text=True)
-    email_font  = Font(color="0563C1", underline="single")  # blue for email cells
+    data_align = Alignment(vertical="center", wrap_text=True)
     for row_idx, lead in enumerate(leads, 4):
         row_fill = (
             PatternFill(start_color=alt_gray, end_color=alt_gray, fill_type="solid")
@@ -95,6 +112,9 @@ def export_to_excel(leads: list[dict], query: str, location: str) -> str:
             lead.get("email", ""),
             lead.get("address", ""),
             lead.get("website", ""),
+            lead.get("instagram", ""),
+            lead.get("facebook", ""),
+            lead.get("tiktok", ""),
             lead.get("category", ""),
             lead.get("rating", ""),
             lead.get("reviews", ""),
@@ -109,9 +129,8 @@ def export_to_excel(leads: list[dict], query: str, location: str) -> str:
             cell.border    = border
             if row_fill:
                 cell.fill = row_fill
-            # Highlight email cells in blue
-            if col == 4 and value:
-                cell.font = email_font
+            if col in _LINK_COLORS and value:
+                cell.font = Font(color=_LINK_COLORS[col], underline="single")
         ws.row_dimensions[row_idx].height = 45
 
     ws.freeze_panes = "A4"
@@ -120,7 +139,9 @@ def export_to_excel(leads: list[dict], query: str, location: str) -> str:
     ws2 = wb.create_sheet("Summary")
     ws2["A1"].value = f"Summary — {query.title()} in {location}"
     ws2["A1"].font  = Font(bold=True, size=14)
-    ws2["A2"].value = f"{len(leads)} total leads  |  {emails_found} emails found"
+    ws2["A2"].value = (
+        f"{len(leads)} total leads  |  {emails_found} emails  |  {social_found} social profiles found"
+    )
     ws2["A2"].font  = Font(italic=True, color="666666")
 
     sources: dict[str, int] = {}
