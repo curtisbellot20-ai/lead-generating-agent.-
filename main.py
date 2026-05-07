@@ -110,18 +110,18 @@ def prompt_inputs() -> dict:
         sys.exit(0)
 
     source_choices = [
-        questionary.Choice("Yellow Pages",        value="yellow_pages", checked=config.SOURCES.get("yellow_pages", True)),
-        questionary.Choice("Yelp",                value="yelp",         checked=config.SOURCES.get("yelp", True)),
-        questionary.Choice("Google Maps",          value="google_maps",  checked=config.SOURCES.get("google_maps", False)),
-        questionary.Choice("BBB",                  value="bbb",          checked=config.SOURCES.get("bbb", False)),
-        questionary.Choice("Angi",                 value="angi",         checked=config.SOURCES.get("angi", False)),
-        questionary.Choice("SunBiz (FL registry)", value="sunbiz",       checked=config.SOURCES.get("sunbiz", False)),
-        questionary.Choice("Chamber of Commerce",  value="chamber",      checked=config.SOURCES.get("chamber", False)),
-        questionary.Choice("BNI Chapters",         value="bni",          checked=config.SOURCES.get("bni", False)),
+        questionary.Choice("Google Maps  ← primary source", value="google_maps",  checked=config.SOURCES.get("google_maps", True)),
+        questionary.Choice("Yellow Pages",                  value="yellow_pages", checked=config.SOURCES.get("yellow_pages", True)),
+        questionary.Choice("BBB",                           value="bbb",          checked=config.SOURCES.get("bbb", True)),
+        questionary.Choice("Angi",                          value="angi",         checked=config.SOURCES.get("angi", True)),
+        questionary.Choice("Yelp",                          value="yelp",         checked=config.SOURCES.get("yelp", False)),
+        questionary.Choice("SunBiz (FL registry)",          value="sunbiz",       checked=config.SOURCES.get("sunbiz", False)),
+        questionary.Choice("Chamber of Commerce",           value="chamber",      checked=config.SOURCES.get("chamber", False)),
+        questionary.Choice("BNI Chapters",                  value="bni",          checked=config.SOURCES.get("bni", False)),
     ]
 
     sources = questionary.checkbox(
-        "Sources to scrape (space to toggle, enter to confirm):",
+        "Sources (Google Maps = primary, rest fill in missing info):",
         choices=source_choices,
     ).ask()
     if sources is None:
@@ -137,7 +137,7 @@ def prompt_inputs() -> dict:
         "location":       location,
         "max_per_source": int(max_per),
         "max_pages":      int(max_pages),
-        "sources":        {s: (s in sources) for s in ["yellow_pages", "yelp", "google_maps", "bbb", "angi", "sunbiz", "chamber", "bni"]},
+        "sources":        {s: (s in sources) for s in ["google_maps", "yellow_pages", "bbb", "angi", "yelp", "sunbiz", "chamber", "bni"]},
     }
 
 

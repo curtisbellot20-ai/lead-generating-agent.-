@@ -14,23 +14,18 @@ SEARCH = {
 }
 
 SOURCES = {
+    "google_maps":  True,   # primary source — always run first
     "yellow_pages": True,
-    "yelp":         True,
-    "google_maps":  False,
-    "bbb":          False,
-    "angi":         False,
+    "yelp":         False,
+    "bbb":          True,
+    "angi":         True,
     "sunbiz":       False,
     "chamber":      False,
     "bni":          False,
 }
 
-CHAMBER_URLS = [
-    # "https://members.ftlchamber.com/list",
-]
-
-BNI_CHAPTER_URLS = [
-    # "https://www.bni.com/en-US/chapters/...",
-]
+CHAMBER_URLS = []
+BNI_CHAPTER_URLS = []
 
 DEMO_MODE = not bool(SCRAPERAPI_KEY)
 
