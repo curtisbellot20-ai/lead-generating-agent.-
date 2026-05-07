@@ -1,3 +1,4 @@
+import re
 import time
 from datetime import datetime
 import requests
@@ -15,6 +16,36 @@ HEADERS = {
         "Chrome/120.0.0.0 Safari/537.36"
     )
 }
+
+# Florida county → cities mapping for county-based filtering
+FL_COUNTY_CITIES = {
+    "broward":      ["fort lauderdale", "hollywood", "pompano beach", "miramar", "coral springs", "pembroke pines", "sunrise", "plantation", "davie", "deerfield beach", "tamarac", "north lauderdale", "margate", "coconut creek", "lauderhill", "weston", "hallandale beach", "oakland park", "wilton manors", "dania beach", "cooper city", "lighthouse point", "lauderdale lakes", "parkland"],
+    "miami-dade":   ["miami", "hialeah", "miami gardens", "homestead", "miami beach", "north miami", "coral gables", "doral", "north miami beach", "aventura", "miami lakes", "cutler bay", "opa-locka", "florida city", "south miami", "sweetwater", "medley"],
+    "palm beach":   ["west palm beach", "boca raton", "delray beach", "boynton beach", "lake worth", "wellington", "palm beach gardens", "jupiter", "greenacres", "royal palm beach", "riviera beach", "belle glade", "palm springs", "pahokee", "lake park"],
+    "orange":       ["orlando", "kissimmee", "apopka", "ocoee", "winter garden", "winter park", "maitland", "edgewood", "belle isle", "eatonville", "windermere"],
+    "hillsborough": ["tampa", "brandon", "temple terrace", "plant city", "riverview", "valrico", "ruskin", "sun city center", "apollo beach"],
+    "pinellas":     ["st. petersburg", "saint petersburg", "clearwater", "largo", "dunedin", "tarpon springs", "pinellas park", "safety harbor", "oldsmar", "seminole", "belleair"],
+    "duval":        ["jacksonville", "jacksonville beach", "neptune beach", "atlantic beach", "baldwin"],
+    "seminole":     ["sanford", "altamonte springs", "casselberry", "longwood", "oviedo", "lake mary", "winter springs"],
+    "volusia":      ["daytona beach", "deltona", "port orange", "ormond beach", "deland", "edgewater", "new smyrna beach", "holly hill", "south daytona"],
+    "brevard":      ["melbourne", "palm bay", "titusville", "rockledge", "cocoa", "cocoa beach", "merritt island", "viera"],
+    "lee":          ["cape coral", "fort myers", "bonita springs", "sanibel", "estero", "lehigh acres"],
+    "collier":      ["naples", "marco island", "immokalee", "everglades city", "golden gate"],
+    "sarasota":     ["sarasota", "venice", "north port", "englewood"],
+    "manatee":      ["bradenton", "palmetto", "ellenton", "anna maria", "holmes beach", "longboat key"],
+    "alachua":      ["gainesville", "archer", "hawthorne", "high springs", "newberry"],
+    "leon":         ["tallahassee", "havana", "midway"],
+    "escambia":     ["pensacola", "pensacola beach", "century"],
+    "pasco":        ["new port richey", "dade city", "zephyrhills", "holiday", "land o lakes"],
+    "polk":         ["lakeland", "winter haven", "bartow", "auburndale", "haines city", "lake wales"],
+    "marion":       ["ocala", "belleview", "dunnellon", "silver springs"],
+    "osceola":      ["kissimmee", "st. cloud", "saint cloud", "poinciana"],
+    "st. lucie":    ["port st. lucie", "fort pierce", "port saint lucie"],
+    "martin":       ["stuart", "hobe sound", "jensen beach", "palm city"],
+    "indian river": ["vero beach", "sebastian", "fellsmere"],
+}
+
+ZIP_RE = re.compile(r"\b(\d{5})\b")
 
 DEMO_DATA = [
     {"name": "SUNSHINE ELECTRICAL SERVICES LLC",  "phone": "", "address": "123 NW 5th Ave, Fort Lauderdale, FL 33311", "website": "", "category": "Electricians", "owner_name": "James Rivera",  "years_in_business": "6",  "source": "SunBiz", "rating": "", "reviews": ""},
@@ -47,13 +78,39 @@ def _fetch(url: str) -> str:
 
 
 def _years_from_date(date_str: str) -> str:
-    """Convert 'MM/DD/YYYY' filing date to years in business."""
     try:
         filed = datetime.strptime(date_str.strip(), "%m/%d/%Y")
         years = (datetime.now() - filed).days // 365
         return str(years) if years >= 0 else ""
     except Exception:
         return ""
+
+
+def _matches_location(address: str, location: str) -> bool:
+    """Return True if the address belongs to the requested location."""
+    if not address:
+        return False
+
+    addr_lower = address.lower()
+    loc_lower  = location.lower().strip()
+
+    # Zip code: 5 digits anywhere in location string
+    zip_match = ZIP_RE.search(loc_lower)
+    if zip_match:
+        return zip_match.group(1) in address
+
+    # County: location contains the word "county"
+    if "county" in loc_lower:
+        county_name = loc_lower.replace("county", "").replace(",", "").replace("fl", "").strip()
+        cities = FL_COUNTY_CITIES.get(county_name, [])
+        if cities:
+            return any(city in addr_lower for city in cities)
+        # Fallback: check if county name itself appears in address (rare but possible)
+        return county_name in addr_lower
+
+    # City: take everything before the first comma
+    city = loc_lower.split(",")[0].strip()
+    return city in addr_lower
 
 
 def _parse_detail(path: str) -> dict:
@@ -65,7 +122,6 @@ def _parse_detail(path: str) -> dict:
     soup = BeautifulSoup(html, "lxml")
     data = {"address": "", "owner_name": "Owner"}
 
-    # Each section is a <div class="detailSection">
     for section in soup.select(".detailSection"):
         label_el = section.select_one(".label")
         if not label_el:
@@ -86,7 +142,7 @@ def _parse_detail(path: str) -> dict:
 
         elif "OFFICER" in label or "AUTHORIZED" in label:
             name_el = section.select_one("span")
-            if name_el and not data.get("owner_name") or data.get("owner_name") == "Owner":
+            if name_el and (not data.get("owner_name") or data.get("owner_name") == "Owner"):
                 name = name_el.get_text(strip=True)
                 if name:
                     data["owner_name"] = name.title()
@@ -98,14 +154,11 @@ def _parse_results(html: str) -> list[dict]:
     soup = BeautifulSoup(html, "lxml")
     leads = []
 
-    table = soup.find("table", {"id": "search-results"})
-    if not table:
-        # fallback: try any table with the right columns
-        table = soup.find("table")
+    table = soup.find("table", {"id": "search-results"}) or soup.find("table")
     if not table:
         return leads
 
-    for row in table.select("tr")[1:]:  # skip header row
+    for row in table.select("tr")[1:]:
         cols = row.find_all("td")
         if len(cols) < 4:
             continue
@@ -114,27 +167,17 @@ def _parse_results(html: str) -> list[dict]:
         if not name_el:
             continue
 
-        name = name_el.get_text(strip=True)
-        link = name_el.get("href", "")
-        doc_num = cols[1].get_text(strip=True) if len(cols) > 1 else ""
-        date_filed = cols[3].get_text(strip=True) if len(cols) > 3 else ""
         status = cols[5].get_text(strip=True).upper() if len(cols) > 5 else ""
-
         if status and status != "ACTIVE":
             continue
 
         leads.append({
-            "name": name,
-            "doc_number": doc_num,
-            "detail_path": link,
-            "years_in_business": _years_from_date(date_filed),
-            "phone": "",
-            "email": "",
-            "website": "",
-            "address": "",
-            "category": "",
-            "rating": "",
-            "reviews": "",
+            "name":              name_el.get_text(strip=True),
+            "detail_path":       name_el.get("href", ""),
+            "doc_number":        cols[1].get_text(strip=True) if len(cols) > 1 else "",
+            "years_in_business": _years_from_date(cols[3].get_text(strip=True) if len(cols) > 3 else ""),
+            "phone": "", "email": "", "website": "", "address": "",
+            "category": "", "rating": "", "reviews": "",
             "owner_name": "Owner",
             "source": "SunBiz",
         })
@@ -148,9 +191,17 @@ def scrape(query: str, location: str, max_results: int = 40, max_pages: int = 3)
         return DEMO_DATA[:max_results]
 
     all_leads: list[dict] = []
+    scanned = 0
     per_page = 20
+    # Scan extra pages to compensate for filtered-out non-local results
+    extended_pages = max_pages * 3
 
-    for page in range(max_pages):
+    print(f"  [SunBiz] Filtering results to: {location}")
+
+    for page in range(extended_pages):
+        if len(all_leads) >= max_results:
+            break
+
         offset = page * per_page
         url = (
             f"{SEARCH_URL}"
@@ -162,33 +213,29 @@ def scrape(query: str, location: str, max_results: int = 40, max_pages: int = 3)
             f"&offset={offset}"
         )
 
-        print(f"  [SunBiz] Scraping page {page + 1}/{max_pages}...")
+        print(f"  [SunBiz] Scraping page {page + 1}...")
         html = _fetch(url)
         if not html:
-            print(f"  [SunBiz] Page {page + 1} fetch failed — stopping")
             break
 
         rows = _parse_results(html)
         if not rows:
-            print(f"  [SunBiz] No results on page {page + 1} — stopping")
             break
 
         for lead in rows:
             detail = _parse_detail(lead.pop("detail_path", ""))
             lead.update(detail)
             lead["category"] = query
-            all_leads.append(lead)
-            time.sleep(0.5)
+            scanned += 1
 
+            if _matches_location(lead.get("address", ""), location):
+                all_leads.append(lead)
+
+            time.sleep(0.5)
             if len(all_leads) >= max_results:
                 break
 
-        print(f"  [SunBiz] Page {page + 1}: +{len(rows)} leads (total: {len(all_leads)})")
-
-        if len(all_leads) >= max_results:
-            break
-
         time.sleep(1.5)
 
-    print(f"  [SunBiz] Done — {len(all_leads)} leads collected")
+    print(f"  [SunBiz] Done — {len(all_leads)} local leads from {scanned} records scanned")
     return all_leads
