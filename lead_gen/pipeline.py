@@ -10,7 +10,7 @@ from lead_gen import config
 from lead_gen.enricher import enrich_leads
 from lead_gen.email_finder import find_emails
 from lead_gen.exporter import export_to_excel
-from lead_gen.scrapers import yellow_pages, yelp, chamber, bni, sunbiz, google_maps
+from lead_gen.scrapers import yellow_pages, yelp, chamber, bni, sunbiz, google_maps, bbb, angi
 
 console = Console()
 
@@ -70,6 +70,16 @@ async def run_pipeline(params: dict | None = None):
             all_leads.extend(google_maps.scrape(query, location, max_per, max_pg))
             progress.advance(task)
 
+        if sources.get("bbb"):
+            progress.update(task, description="Scraping [bold]BBB[/bold]...")
+            all_leads.extend(bbb.scrape(query, location, max_per, max_pg))
+            progress.advance(task)
+
+        if sources.get("angi"):
+            progress.update(task, description="Scraping [bold]Angi[/bold]...")
+            all_leads.extend(angi.scrape(query, location, max_per, max_pg))
+            progress.advance(task)
+
         if sources.get("sunbiz"):
             progress.update(task, description="Scraping [bold]SunBiz[/bold]...")
             all_leads.extend(sunbiz.scrape(query, location, max_per, max_pg))
@@ -104,7 +114,6 @@ async def run_pipeline(params: dict | None = None):
     output_file = export_to_excel(all_leads, query, location)
 
     emails_found = sum(1 for l in all_leads if l.get("email"))
-
     summary = Table(box=box.ROUNDED, show_header=False, padding=(0, 2), border_style="green")
     summary.add_column(style="dim")
     summary.add_column(style="bold")

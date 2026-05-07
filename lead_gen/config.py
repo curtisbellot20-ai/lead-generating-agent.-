@@ -7,19 +7,21 @@ ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
 SCRAPERAPI_KEY = os.getenv("SCRAPERAPI_KEY", "")
 
 SEARCH = {
-    "query": "plumbers",
-    "location": "Fort Lauderdale, FL",
+    "query":          "plumbers",
+    "location":       "Fort Lauderdale, FL",
     "max_per_source": 40,
-    "max_pages": 3,
+    "max_pages":      3,
 }
 
 SOURCES = {
-    "yellow_pages":  True,
-    "yelp":          True,
-    "google_maps":   False,
-    "sunbiz":        False,
-    "chamber":       False,
-    "bni":           False,
+    "yellow_pages": True,
+    "yelp":         True,
+    "google_maps":  False,
+    "bbb":          False,
+    "angi":         False,
+    "sunbiz":       False,
+    "chamber":      False,
+    "bni":          False,
 }
 
 CHAMBER_URLS = [
