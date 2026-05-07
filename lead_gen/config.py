@@ -13,26 +13,23 @@ SEARCH = {
     "max_pages": 3,
 }
 
-# Toggle sources on/off
 SOURCES = {
-    "yellow_pages": True,
-    "yelp": True,
-    "sunbiz": False,
-    "chamber": False,
-    "bni": False,
+    "yellow_pages":  True,
+    "yelp":          True,
+    "google_maps":   False,
+    "sunbiz":        False,
+    "chamber":       False,
+    "bni":           False,
 }
 
-# Add your local Chamber of Commerce member directory URLs here
 CHAMBER_URLS = [
     # "https://members.ftlchamber.com/list",
 ]
 
-# Add BNI chapter member page URLs here
 BNI_CHAPTER_URLS = [
     # "https://www.bni.com/en-US/chapters/...",
 ]
 
-# Automatically uses demo mode when no ScraperAPI key is set
 DEMO_MODE = not bool(SCRAPERAPI_KEY)
 
 OUTPUT_DIR = "outputs"

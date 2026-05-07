@@ -10,7 +10,7 @@ from lead_gen import config
 from lead_gen.enricher import enrich_leads
 from lead_gen.email_finder import find_emails
 from lead_gen.exporter import export_to_excel
-from lead_gen.scrapers import yellow_pages, yelp, chamber, bni, sunbiz
+from lead_gen.scrapers import yellow_pages, yelp, chamber, bni, sunbiz, google_maps
 
 console = Console()
 
@@ -45,7 +45,6 @@ async def run_pipeline(params: dict | None = None):
     all_leads: list[dict] = []
     active_sources = [k for k, v in sources.items() if v]
 
-    # ── Scraping ──────────────────────────────────────────────────
     with Progress(
         SpinnerColumn(),
         TextColumn("[progress.description]{task.description}"),
@@ -64,6 +63,11 @@ async def run_pipeline(params: dict | None = None):
         if sources.get("yelp"):
             progress.update(task, description="Scraping [bold]Yelp[/bold]...")
             all_leads.extend(yelp.scrape(query, location, max_per, max_pg))
+            progress.advance(task)
+
+        if sources.get("google_maps"):
+            progress.update(task, description="Scraping [bold]Google Maps[/bold]...")
+            all_leads.extend(google_maps.scrape(query, location, max_per, max_pg))
             progress.advance(task)
 
         if sources.get("sunbiz"):
@@ -88,21 +92,17 @@ async def run_pipeline(params: dict | None = None):
         f"→ [green]{len(all_leads)}[/green] after deduplication\n"
     )
 
-    # ── Email finder ─────────────────────────────────────────────
     console.rule("[bold]Finding email addresses[/bold]")
     all_leads = find_emails(all_leads)
     console.print()
 
-    # ── AI enrichment ────────────────────────────────────────────
     console.rule("[bold]Enriching with Claude AI[/bold]")
     all_leads = enrich_leads(all_leads)
     console.print()
 
-    # ── Export ───────────────────────────────────────────────────
     console.rule("[bold]Exporting[/bold]")
     output_file = export_to_excel(all_leads, query, location)
 
-    # ── Summary ──────────────────────────────────────────────────
     emails_found = sum(1 for l in all_leads if l.get("email"))
 
     summary = Table(box=box.ROUNDED, show_header=False, padding=(0, 2), border_style="green")

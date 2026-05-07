@@ -69,11 +69,12 @@ def prompt_inputs() -> dict:
         sys.exit(0)
 
     source_choices = [
-        questionary.Choice("Yellow Pages",        value="yellow_pages", checked=config.SOURCES.get("yellow_pages", True)),
-        questionary.Choice("Yelp",                value="yelp",         checked=config.SOURCES.get("yelp", True)),
-        questionary.Choice("SunBiz (FL registry)",value="sunbiz",       checked=config.SOURCES.get("sunbiz", False)),
-        questionary.Choice("Chamber of Commerce", value="chamber",      checked=config.SOURCES.get("chamber", False)),
-        questionary.Choice("BNI Chapters",        value="bni",          checked=config.SOURCES.get("bni", False)),
+        questionary.Choice("Yellow Pages",         value="yellow_pages", checked=config.SOURCES.get("yellow_pages", True)),
+        questionary.Choice("Yelp",                 value="yelp",         checked=config.SOURCES.get("yelp", True)),
+        questionary.Choice("Google Maps",           value="google_maps",  checked=config.SOURCES.get("google_maps", False)),
+        questionary.Choice("SunBiz (FL registry)",  value="sunbiz",       checked=config.SOURCES.get("sunbiz", False)),
+        questionary.Choice("Chamber of Commerce",  value="chamber",      checked=config.SOURCES.get("chamber", False)),
+        questionary.Choice("BNI Chapters",          value="bni",          checked=config.SOURCES.get("bni", False)),
     ]
 
     sources = questionary.checkbox(
@@ -93,7 +94,7 @@ def prompt_inputs() -> dict:
         "location":       location.strip(),
         "max_per_source": int(max_per),
         "max_pages":      config.SEARCH.get("max_pages", 3),
-        "sources":        {s: (s in sources) for s in ["yellow_pages", "yelp", "sunbiz", "chamber", "bni"]},
+        "sources":        {s: (s in sources) for s in ["yellow_pages", "yelp", "google_maps", "sunbiz", "chamber", "bni"]},
     }
 
 
