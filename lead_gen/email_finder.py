@@ -1,213 +1,83 @@
-import re
-import time
-import requests
-from concurrent.futures import ThreadPoolExecutor, as_completed
-from urllib.parse import urljoin
+"""Website visit pipeline.
+
+1. website_scraper visits all pages (Playwright or requests)
+2. ai_extractor sends cleaned text + schema to Claude for structured extraction
+3. Results merged into leads — only filling empty fields
+"""
+
+import asyncio
+from concurrent.futures import ThreadPoolExecutor
 
 from rich.console import Console
 from rich.progress import Progress, SpinnerColumn, BarColumn, TextColumn
 
-from lead_gen import config
+from lead_gen import website_scraper, ai_extractor
 
 console = Console()
 
-EMAIL_REGEX = re.compile(r"[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}")
 
-SOCIAL_REGEX = {
-    "instagram": re.compile(r'instagram\.com/(?!p/|reel/|stories/|explore/|accounts/|share)([A-Za-z0-9._]{1,40})', re.IGNORECASE),
-    "facebook":  re.compile(r'facebook\.com/(?!sharer|share|plugins|tr/|dialog/|events/|groups/)([A-Za-z0-9._\-]{3,})', re.IGNORECASE),
-    "tiktok":    re.compile(r'tiktok\.com/@?([A-Za-z0-9._]{2,40})', re.IGNORECASE),
-}
+def _apply(lead: dict, scraped: dict, extracted: dict):
+    """Merge scraped + AI-extracted data into lead without overwriting existing values."""
+    # --- Raw scraper data ---------------------------------------------------
+    if scraped.get("emails") and not lead.get("email"):
+        lead["email"] = scraped["emails"][0]
+    if scraped.get("phones") and not lead.get("phone"):
+        lead["phone"] = scraped["phones"][0]
+    if scraped.get("description") and not lead.get("description"):
+        lead["description"] = scraped["description"]
+    for p in ("instagram", "facebook", "tiktok", "linkedin", "twitter"):
+        if not lead.get(p) and scraped.get("social", {}).get(p):
+            lead[p] = scraped["social"][p]
 
-SKIP_HANDLES = {
-    "instagram": {"p", "reel", "stories", "explore", "accounts", "share", "sharer", "photo", "tv"},
-    "facebook":  {"sharer", "share", "plugins", "tr", "dialog", "groups", "events", "pages", "photo"},
-    "tiktok":    {"share", "discover", "trending", "following", "foryou"},
-}
+    if not extracted:
+        return
 
-SKIP_DOMAINS = {
-    "example.com", "sentry.io", "wixpress.com", "squarespace.com",
-    "wordpress.com", "godaddy.com", "schema.org", "w3.org",
-    "googleapis.com", "cloudflare.com", "facebook.com", "twitter.com",
-    "instagram.com", "youtube.com", "linkedin.com", "yelp.com",
-    "yellowpages.com", "google.com", "apple.com", "microsoft.com",
-}
+    # --- AI extraction ------------------------------------------------------
+    if not lead.get("email") and extracted.get("primary_email"):
+        lead["email"] = extracted["primary_email"]
+    if not lead.get("phone") and extracted.get("primary_phone"):
+        lead["phone"] = extracted["primary_phone"]
 
-SKIP_PREFIXES = {
-    "noreply", "no-reply", "donotreply", "mailer-daemon",
-    "bounce", "postmaster", "webmaster",
-}
+    # Owner / decision-maker: prefer higher confidence
+    dm      = extracted.get("decision_maker") or ""
+    own     = extracted.get("owner_name") or ""
+    dm_c    = extracted.get("decision_maker_confidence", "NONE")
+    own_c   = extracted.get("owner_confidence", "NONE")
+    best    = (dm  if dm_c  in ("HIGH", "MEDIUM") else
+               own if own_c in ("HIGH", "MEDIUM") else
+               dm or own)
+    best_c  = (dm_c  if dm_c  in ("HIGH", "MEDIUM") else
+               own_c if own_c in ("HIGH", "MEDIUM") else
+               dm_c or own_c)
 
-# Ordered by most likely to have useful content — stop at first hit
-CONTACT_PATHS = ["/contact", "/contact-us", "/about", "/about-us"]
-ABOUT_PATHS   = ["/about", "/about-us", "/our-story", "/our-team", "/team", "/who-we-are"]
+    if (not lead.get("owner_name") or lead.get("owner_name") == "Owner") and best:
+        lead["owner_name"]       = best
+        lead["owner_confidence"] = best_c
 
-HEADERS = {
-    "User-Agent": (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/120.0.0.0 Safari/537.36"
-    )
-}
+    # Decision-maker stored separately for the DM column
+    if not lead.get("decision_maker"):
+        lead["decision_maker"]       = dm or own
+        lead["decision_maker_title"] = extracted.get("decision_maker_title", "")
 
-# ── Owner / year extraction ────────────────────────────────────────────
-_NAME_PATTERNS = [
-    re.compile(r'(?:founded|owned|started|established|created|run)\s+by\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+){1,3})', re.IGNORECASE),
-    re.compile(r'(?:owner|founder|president|ceo|principal|operator|proprietor)\s*[:\-–]\s*([A-Z][a-z]+(?:\s+[A-Z][a-z]+){1,3})', re.IGNORECASE),
-    re.compile(r"(?:I'?m|I am|my name is)\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+){1,3})", re.IGNORECASE),
-    re.compile(r'[Mm]eet\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+){1,3})\s*,?\s*(?:owner|founder|president|ceo)', re.IGNORECASE),
-    re.compile(r'"(?:name|givenName)"\s*:\s*"([A-Z][a-z]+(?:\s+[A-Z][a-z]+){1,3})"'),
-]
+    if not lead.get("description") and extracted.get("business_description"):
+        lead["description"] = extracted["business_description"]
+    if not lead.get("years_in_business") and extracted.get("years_in_business"):
+        lead["years_in_business"] = extracted["years_in_business"]
 
-_YEAR_PATTERNS = [
-    re.compile(r'(?:founded|established|est\.?|incorporated|started|opened|began)\s+(?:in\s+)?((?:19|20)\d{2})', re.IGNORECASE),
-    re.compile(r'(?:since|serving since|in business since)\s+((?:19|20)\d{2})', re.IGNORECASE),
-    re.compile(r'(?:©|&copy;|copyright)\s*((?:19|20)\d{2})'),
-    re.compile(r'(\d{1,2})\+?\s+years?\s+(?:of\s+)?(?:experience|in\s+business|serving)', re.IGNORECASE),
-]
-
-CURRENT_YEAR = 2026
-WORKERS      = 6   # parallel website visits
+    for p in ("instagram", "facebook", "tiktok", "linkedin", "twitter"):
+        if not lead.get(p) and extracted.get(p):
+            lead[p] = extracted[p]
 
 
-def _normalize_url(url: str) -> str:
-    url = url.strip()
-    if not url.startswith("http"):
-        url = "https://" + url
-    return url.rstrip("/")
-
-
-def _is_valid_email(email: str) -> bool:
-    if "@" not in email:
-        return False
-    local, domain = email.lower().rsplit("@", 1)
-    if domain in SKIP_DOMAINS or any(local.startswith(p) for p in SKIP_PREFIXES):
-        return False
-    return len(local) >= 2 and "." in domain
-
-
-def _fetch(url: str, timeout: int = 7) -> str:
-    try:
-        resp = requests.get(url, headers=HEADERS, timeout=timeout, allow_redirects=True)
-        if resp.ok:
-            return resp.text
-    except Exception:
-        pass
-    return ""
-
-
-def _best_email(html: str) -> str:
-    raw   = EMAIL_REGEX.findall(html)
-    valid = [e.lower() for e in raw if _is_valid_email(e.lower())]
-    priority = [e for e in valid if e.split("@")[0] in {"contact", "info", "hello", "email", "mail", "hi"}]
-    return (priority or valid or [""])[0]
-
-
-def _extract_social(html: str) -> dict:
-    links = {}
-    for platform, regex in SOCIAL_REGEX.items():
-        for m in regex.finditer(html):
-            handle = m.group(1).strip("/").split("?")[0].split("&")[0]
-            if handle and handle.lower() not in SKIP_HANDLES[platform] and len(handle) > 1:
-                links[platform] = (
-                    f"https://www.tiktok.com/@{handle}" if platform == "tiktok"
-                    else f"https://www.{platform}.com/{handle}"
-                )
-                break
-    return links
-
-
-def _extract_owner(text: str) -> str:
-    text = re.sub(r'<[^>]+>', ' ', text)
-    text = re.sub(r'\s+', ' ', text)
-    for p in _NAME_PATTERNS:
-        m = p.search(text)
-        if m:
-            name = m.group(1).strip()
-            if len(name) <= 40 and not re.search(r'\d', name) and not name.isupper():
-                return name
-    return ""
-
-
-def _extract_year(text: str) -> str:
-    text = re.sub(r'<[^>]+>', ' ', text)
-    text = re.sub(r'\s+', ' ', text)
-    for p in _YEAR_PATTERNS:
-        m = p.search(text)
-        if m:
-            val = m.group(1).strip()
-            if re.fullmatch(r'(?:19|20)\d{2}', val):
-                year = int(val)
-                if 1900 < year <= CURRENT_YEAR:
-                    return str(CURRENT_YEAR - year)
-            else:
-                num = int(val)
-                if 1 <= num <= 100:
-                    return str(num)
-    return ""
-
-
-def _find_for_lead(lead: dict) -> dict:
-    """Visit a lead's website and extract email, social, owner name, years."""
-    website = _normalize_url(lead.get("website", ""))
-    empty = {"email": "", "instagram": "", "facebook": "", "tiktok": "",
-             "owner_name": "", "years_in_business": ""}
-    if not website:
-        return empty
-
-    already_has_owner = bool(lead.get("owner_name"))
-    already_has_years = bool(lead.get("years_in_business"))
-
-    all_html   = ""
-    about_html = ""
-    email      = ""
-
-    # Homepage
-    html = _fetch(website)
-    all_html += html
-    email = _best_email(html)
-
-    # One contact/about page if still no email
-    if not email:
-        for path in CONTACT_PATHS:
-            url  = urljoin(website + "/", path.lstrip("/"))
-            html = _fetch(url)
-            if not html:
-                continue
-            all_html += html
-            email = _best_email(html)
-            if email:
-                break
-
-    # One about page for owner / year (skip if already filled from Google enrichment)
-    if not already_has_owner or not already_has_years:
-        for path in ABOUT_PATHS:
-            url  = urljoin(website + "/", path.lstrip("/"))
-            html = _fetch(url)
-            if html and len(html) > 500:
-                about_html = html
-                break
-
-    combined = about_html or all_html
-    owner = "" if already_has_owner else _extract_owner(combined)
-    years = "" if already_has_years else _extract_year(combined)
-
-    social = _extract_social(all_html)
-    return {
-        "email":             email,
-        "instagram":         social.get("instagram", ""),
-        "facebook":          social.get("facebook",  ""),
-        "tiktok":            social.get("tiktok",    ""),
-        "owner_name":        owner,
-        "years_in_business": years,
-    }
-
-
-def find_emails(leads: list[dict]) -> list[dict]:
+async def find_emails(leads: list[dict]) -> list[dict]:
     with_site = [l for l in leads if l.get("website")]
     no_site   = [l for l in leads if not l.get("website")]
 
-    emails_found = social_found = owners_found = years_found = 0
+    if not with_site:
+        console.print("  No leads with websites to visit")
+        return leads
+
+    emails_found = social_found = owners_found = 0
 
     with Progress(
         SpinnerColumn(),
@@ -218,42 +88,42 @@ def find_emails(leads: list[dict]) -> list[dict]:
         transient=True,
     ) as progress:
         task = progress.add_task(
-            f"Visiting {len(with_site)} sites ({WORKERS} at a time)...",
-            total=len(with_site),
+            f"Scraping {len(with_site)} websites...",
+            total=len(with_site) * 2,
         )
 
-        with ThreadPoolExecutor(max_workers=WORKERS) as pool:
-            futures = {pool.submit(_find_for_lead, lead): lead for lead in with_site}
-            for future in as_completed(futures):
-                lead   = futures[future]
-                result = future.result()
+        # Step 1 — parallel page scraping (Playwright or requests)
+        progress.update(task, description="Rendering pages...")
+        scraped_list = await website_scraper.scrape_all(with_site)
+        progress.advance(task, len(with_site))
 
-                lead["email"]     = result["email"]
-                lead["instagram"] = result["instagram"]
-                lead["facebook"]  = result["facebook"]
-                lead["tiktok"]    = result["tiktok"]
+        # Step 2 — AI field extraction (parallel via thread pool, sync SDK)
+        progress.update(task, description="AI extracting owner / email / social...")
+        loop = asyncio.get_event_loop()
+        with ThreadPoolExecutor(max_workers=6) as pool:
+            futures = [
+                loop.run_in_executor(pool, ai_extractor.extract, lead["name"], scraped)
+                for lead, scraped in zip(with_site, scraped_list)
+            ]
+            extracted_list = list(await asyncio.gather(*futures))
+        progress.advance(task, len(with_site))
 
-                if not lead.get("owner_name") and result["owner_name"]:
-                    lead["owner_name"] = result["owner_name"]
-                if not lead.get("years_in_business") and result["years_in_business"]:
-                    lead["years_in_business"] = result["years_in_business"]
-
-                if result["email"]:      emails_found += 1
-                if any([result["instagram"], result["facebook"], result["tiktok"]]): social_found += 1
-                if result["owner_name"]: owners_found += 1
-                if result["years_in_business"]: years_found += 1
-
-                progress.update(task, description=f"[dim]{lead['name'][:35]}[/dim]")
-                progress.advance(task)
+    # Merge results into leads
+    for lead, scraped, extracted in zip(with_site, scraped_list, extracted_list):
+        _apply(lead, scraped, extracted)
+        if lead.get("email"):                                               emails_found += 1
+        if any(lead.get(p) for p in ("instagram","facebook","tiktok")):    social_found += 1
+        if lead.get("owner_name") and lead["owner_name"] != "Owner":        owners_found += 1
 
     for lead in no_site:
-        lead.update({"email": "", "instagram": "", "facebook": "", "tiktok": ""})
+        for k in ("email","instagram","facebook","tiktok","linkedin","twitter",
+                  "decision_maker","decision_maker_title","description"):
+            lead.setdefault(k, "")
 
     console.print(
         f"  Found [green]{emails_found}[/green] emails, "
         f"[magenta]{social_found}[/magenta] social profiles, "
-        f"[yellow]{owners_found}[/yellow] owner names, "
-        f"[blue]{years_found}[/blue] founding years "
-        f"from [cyan]{len(with_site)}[/cyan] sites checked"
+        f"[yellow]{owners_found}[/yellow] owner/decision-maker names "
+        f"from [cyan]{len(with_site)}[/cyan] sites"
     )
     return leads
