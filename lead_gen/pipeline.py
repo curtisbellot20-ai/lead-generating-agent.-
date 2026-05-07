@@ -4,6 +4,7 @@ import re
 from rich.console import Console
 from rich.panel import Panel
 from rich.progress import Progress, SpinnerColumn, BarColumn, TextColumn, TimeElapsedColumn
+from rich.rule import Rule
 from rich.table import Table
 from rich import box
 
@@ -11,6 +12,7 @@ from lead_gen import config
 from lead_gen.enricher import enrich_leads
 from lead_gen.email_finder import find_emails
 from lead_gen.google_enricher import enrich as google_enrich
+from lead_gen.query_expander import expand as expand_queries
 from lead_gen.exporter import export_to_excel
 from lead_gen.scrapers import yellow_pages, yelp, chamber, bni, sunbiz, google_maps, bbb, angi
 
@@ -31,22 +33,19 @@ def _normalize_name(name: str) -> str:
 
 
 def _normalize_phone(phone: str) -> str:
-    return re.sub(r'\D', '', phone or "")[-10:]  # last 10 digits
+    return re.sub(r'\D', '', phone or "")[-10:]
 
 
 def _names_match(a: str, b: str) -> bool:
     na, nb = _normalize_name(a), _normalize_name(b)
     if not na or not nb:
         return False
-    if na == nb:
-        return True
-    if na in nb or nb in na:
+    if na == nb or na in nb or nb in na:
         return True
     wa, wb = set(na.split()), set(nb.split())
     if not wa or not wb:
         return False
-    overlap = len(wa & wb) / max(len(wa), len(wb))
-    return overlap >= 0.70
+    return len(wa & wb) / max(len(wa), len(wb)) >= 0.70
 
 
 def _merge(primary: dict, secondary: dict) -> dict:
@@ -60,30 +59,21 @@ def _merge(primary: dict, secondary: dict) -> dict:
 
 
 def cross_reference(primary: list[dict], secondary: list[dict]) -> list[dict]:
-    """Merge secondary source data into matching primary leads."""
     matched_idx: set[int] = set()
     result: list[dict] = []
-
     for lead in primary:
         merged = lead.copy()
         p_name  = lead.get("name", "")
         p_phone = _normalize_phone(lead.get("phone", ""))
-
         for i, sec in enumerate(secondary):
             s_phone = _normalize_phone(sec.get("phone", ""))
-            phone_match = bool(p_phone and s_phone and p_phone == s_phone)
-            name_match  = _names_match(p_name, sec.get("name", ""))
-
-            if phone_match or name_match:
+            if (p_phone and s_phone and p_phone == s_phone) or _names_match(p_name, sec.get("name", "")):
                 merged = _merge(merged, sec)
                 matched_idx.add(i)
-
         result.append(merged)
-
     for i, sec in enumerate(secondary):
         if i not in matched_idx:
             result.append(sec)
-
     return result
 
 
@@ -114,9 +104,18 @@ async def run_pipeline(params: dict | None = None):
     max_pg   = params["max_pages"]
     sources  = params["sources"]
 
-    primary_leads:   list[dict] = []   # Google Maps
-    secondary_leads: list[dict] = []   # everything else
+    primary_leads:   list[dict] = []
+    secondary_leads: list[dict] = []
     active_sources = [k for k, v in sources.items() if v]
+
+    # ── Step 1: AI query expansion ──────────────────────────────────────
+    console.rule("[bold]Expanding search queries with AI[/bold]")
+    expanded = expand_queries(query, location)
+    extra_queries = [q for q in expanded if q.lower() != query.lower()]
+    console.print()
+
+    # ── Step 2: Scrape all sources ─────────────────────────────────
+    console.rule("[bold]Scraping sources[/bold]")
 
     with Progress(
         SpinnerColumn(),
@@ -128,13 +127,11 @@ async def run_pipeline(params: dict | None = None):
     ) as progress:
         task = progress.add_task("Scraping sources...", total=len(active_sources))
 
-        # ── Google Maps first — becomes the master list ─────────────────
         if sources.get("google_maps"):
-            progress.update(task, description="Scraping [bold]Google Maps[/bold] (primary)...")
-            primary_leads = google_maps.scrape(query, location, max_per, max_pg)
+            progress.update(task, description="Scraping [bold]Google Maps[/bold] (primary, multi-query)...")
+            primary_leads = google_maps.scrape(query, location, max_per, max_pg, extra_queries=extra_queries)
             progress.advance(task)
 
-        # ── Secondary sources — used to fill in missing fields ───────────
         if sources.get("yellow_pages"):
             progress.update(task, description="Scraping [bold]Yellow Pages[/bold]...")
             secondary_leads.extend(yellow_pages.scrape(query, location, max_per, max_pg))
@@ -170,7 +167,7 @@ async def run_pipeline(params: dict | None = None):
             secondary_leads.extend(bni.scrape(config.BNI_CHAPTER_URLS, max_per))
             progress.advance(task)
 
-    # ── Cross-reference ───────────────────────────────────────────────
+    # ── Step 3: Cross-reference ─────────────────────────────────────
     if primary_leads:
         console.print(f"  Google Maps: [cyan]{len(primary_leads)}[/cyan] primary leads")
         console.print(f"  Other sources: [cyan]{len(secondary_leads)}[/cyan] secondary leads")
@@ -182,38 +179,39 @@ async def run_pipeline(params: dict | None = None):
         all_leads = deduplicate(primary_leads + secondary_leads)
         console.print(f"  Collected [green]{len(all_leads)}[/green] leads after deduplication\n")
 
-    # ── Google search enrichment (fills remaining gaps per-lead) ────────
+    # ── Step 4: Google search enrichment ───────────────────────────
     console.rule("[bold]Google search enrichment[/bold]")
     all_leads = google_enrich(all_leads)
     console.print()
 
-    # ── Website visit: email + social + About Us ─────────────────────
+    # ── Step 5: Website visit ──────────────────────────────────────
     console.rule("[bold]Visiting websites (email, social, About Us)[/bold]")
     all_leads = find_emails(all_leads)
     console.print()
 
-    # ── Claude AI enrichment (outreach notes + industry tag) ──────────
+    # ── Step 6: Claude AI enrichment ─────────────────────────────
     console.rule("[bold]Enriching with Claude AI[/bold]")
     all_leads = enrich_leads(all_leads)
     console.print()
 
-    # ── Export ───────────────────────────────────────────────────
+    # ── Step 7: Export ─────────────────────────────────────────
     console.rule("[bold]Exporting[/bold]")
     output_file = export_to_excel(all_leads, query, location)
 
-    emails_found  = sum(1 for l in all_leads if l.get("email"))
-    social_found  = sum(1 for l in all_leads if l.get("instagram") or l.get("facebook") or l.get("tiktok"))
-    owners_found  = sum(1 for l in all_leads if l.get("owner_name") and l["owner_name"] != "Owner")
+    emails_found = sum(1 for l in all_leads if l.get("email"))
+    social_found = sum(1 for l in all_leads if l.get("instagram") or l.get("facebook") or l.get("tiktok"))
+    owners_found = sum(1 for l in all_leads if l.get("owner_name") and l["owner_name"] != "Owner")
 
     summary = Table(box=box.ROUNDED, show_header=False, padding=(0, 2), border_style="green")
     summary.add_column(style="dim")
     summary.add_column(style="bold")
-    summary.add_row("Query",         f"{query} in {location}")
-    summary.add_row("Total leads",   str(len(all_leads)))
-    summary.add_row("Emails found",  f"{emails_found} / {len(all_leads)}")
+    summary.add_row("Query",           f"{query} in {location}")
+    summary.add_row("Search queries",  str(len(expanded)))
+    summary.add_row("Total leads",     str(len(all_leads)))
+    summary.add_row("Emails found",    f"{emails_found} / {len(all_leads)}")
     summary.add_row("Social profiles", f"{social_found} / {len(all_leads)}")
-    summary.add_row("Owner names",   f"{owners_found} / {len(all_leads)}")
-    summary.add_row("Saved to",      f"[cyan]{output_file}[/cyan]")
+    summary.add_row("Owner names",     f"{owners_found} / {len(all_leads)}")
+    summary.add_row("Saved to",        f"[cyan]{output_file}[/cyan]")
 
     console.print()
     console.print(Panel(summary, title="[bold green] Done! [/bold green]", border_style="green"))
